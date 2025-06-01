@@ -53,7 +53,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         }
 
         # Logging configuration
-        self.log_interval = 60  # Log every 60 seconds
+        self.log_interval = 300  # Log every 5 minutes instead of 1 minute
 
         # Get frame dimensions
         dummy_obs = self.env.reset()
@@ -114,7 +114,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return player_health, opponent_health
 
     def _log_periodic_stats(self):
-        """Log win rate statistics periodically"""
+        """Log all environment win rates periodically"""
         current_time = time.time()
         time_since_last_log = (
             current_time - SamuraiShowdownCustomWrapper._global_stats["last_log_time"]
@@ -122,55 +122,28 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         if time_since_last_log >= self.log_interval:
             global_stats = SamuraiShowdownCustomWrapper._global_stats
-            session_time = current_time - global_stats["session_start"]
-            total_rounds = global_stats["total_rounds"]
-            global_win_rate = (
-                (global_stats["total_wins"] / total_rounds * 100)
-                if total_rounds > 0
-                else 0
-            )
 
-            print(
-                f"\n📊 WIN RATES [{datetime.now().strftime('%H:%M:%S')}] Session: {session_time/3600:.1f}h | Global: {global_stats['total_wins']}W/{global_stats['total_losses']}L ({global_win_rate:.1f}%)"
-            )
+            print(f"\n📊 ALL ENV WIN RATES:")
 
-            # Show top 5 and bottom 5 performers
-            env_rates = []
+            # Show all environments
             for env_id, stats in global_stats["env_stats"].items():
                 if stats["total_rounds"] > 0:
                     win_rate = stats["wins"] / stats["total_rounds"] * 100
-                    env_rates.append(
-                        (
-                            env_id,
-                            win_rate,
-                            stats["wins"],
-                            stats["losses"],
-                            stats["total_rounds"],
-                        )
-                    )
-
-            if env_rates:
-                env_rates.sort(key=lambda x: x[1], reverse=True)
-
-                print(f"   Top 5: ", end="")
-                for i, (env_id, rate, w, l, r) in enumerate(env_rates[:5]):
+                    if stats["wins"] > stats["losses"]:
+                        emoji = "🏆"
+                    elif stats["wins"] < stats["losses"]:
+                        emoji = "💀"
+                    else:
+                        emoji = "⚖️"
                     print(
-                        f"{env_id}: {rate:.0f}%({w}W/{l}L)", end=" | " if i < 4 else ""
+                        f"   {emoji} {env_id}: {stats['wins']}W/{stats['losses']}L ({win_rate:.1f}%)"
                     )
-                print()
+                else:
+                    print(f"   ⏳ {env_id}: 0W/0L (0.0%)")
 
-                if len(env_rates) > 5:
-                    print(f"   Bottom 5: ", end="")
-                    for i, (env_id, rate, w, l, r) in enumerate(env_rates[-5:]):
-                        print(
-                            f"{env_id}: {rate:.0f}%({w}W/{l}L)",
-                            end=" | " if i < 4 else "",
-                        )
-                    print()
-
+            print()  # Empty line after the list
             global_stats["last_log_time"] = current_time
 
-    # no win loss
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
         """Calculate reward and track wins/losses"""
         reward = 0.0
@@ -223,8 +196,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         damage_dealt = max(0, self.prev_opponent_health - curr_opponent_health)
         damage_received = max(0, self.prev_player_health - curr_player_health)
 
-        reward += damage_dealt
-        reward -= damage_received
+        reward += damage_dealt * 2
+        reward -= damage_received * 1
 
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
@@ -285,13 +258,5 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
     @classmethod
     def print_final_stats(cls):
         """Print final statistics when training ends"""
-        stats = cls._global_stats
-        session_time = time.time() - stats["session_start"]
-        total_rounds = stats["total_rounds"]
-        global_win_rate = (
-            (stats["total_wins"] / total_rounds * 100) if total_rounds > 0 else 0
-        )
-
-        print(
-            f"\n🏁 FINAL STATS: {session_time/3600:.1f}h | {stats['total_wins']}W/{stats['total_losses']}L ({global_win_rate:.1f}%) | {len(stats['env_stats'])} envs"
-        )
+        # Remove final stats completely - just silent cleanup
+        pass
