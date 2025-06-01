@@ -26,10 +26,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.episode_steps = 0
         self.reset_round = reset_round
 
-        # Win tracking for display
+        # Win tracking for each environment with unique ID
+        import time
+        import random
+
+        self.env_id = f"ENV-{random.randint(1000, 9999)}"  # Unique environment ID
         self.wins = 0
         self.losses = 0
         self.total_rounds = 0
+        self.rounds_this_session = 0
 
         # Get actual frame dimensions and calculate resized dimensions
         dummy_obs = self.env.reset()
@@ -112,14 +117,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         player_health = info.get("health", self.full_hp)
         opponent_health = info.get("enemy_health", self.full_hp)
 
-        # Debug: Print available keys on first call for verification
-        if not hasattr(self, "_debug_printed"):
-            print(
-                f"🔍 Using only health tracking: health={player_health}, enemy_health={opponent_health}"
-            )
-            print(f"   Available info keys: {list(info.keys())}")
-            self._debug_printed = True
-
         return player_health, opponent_health
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
@@ -130,18 +127,23 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Check for round end
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
+            self.rounds_this_session += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
                 # Win bonus
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
-                print(f"🏆 WIN! {self.wins}/{self.total_rounds} ({win_rate:.1%})")
+                print(
+                    f"🏆 {self.env_id} WIN! W:{self.wins} L:{self.losses} Rate:{win_rate:.1%} [Round {self.rounds_this_session}]"
+                )
                 reward += 100  # Large win bonus
             elif curr_player_health <= 0 and curr_opponent_health > 0:
                 # Loss penalty
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
-                print(f"💀 LOSS! {self.wins}/{self.total_rounds} ({win_rate:.1%})")
+                print(
+                    f"💀 {self.env_id} LOSS! W:{self.wins} L:{self.losses} Rate:{win_rate:.1%} [Round {self.rounds_this_session}]"
+                )
                 reward -= 100  # Large loss penalty
 
             if self.reset_round:
