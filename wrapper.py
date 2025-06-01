@@ -196,7 +196,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         damage_dealt = max(0, self.prev_opponent_health - curr_opponent_health)
         damage_received = max(0, self.prev_player_health - curr_player_health)
 
-        reward += damage_dealt * 2
+        reward += damage_dealt * 1
         reward -= damage_received * 1
 
         self.prev_player_health = curr_player_health
