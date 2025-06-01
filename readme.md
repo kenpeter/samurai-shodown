@@ -2,4 +2,4 @@
 
 
 
-python train.py --render --num-envs 38 --total-timesteps 10000000
+python train.py --render --num-envs 16 --total-timesteps 10000000

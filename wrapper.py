@@ -15,10 +15,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.num_frames = 9  # Frame stacking
         self.frame_stack = collections.deque(maxlen=self.num_frames)
 
-        # Health tracking - NEED TO ADJUST FOR SAMURAI SHOWDOWN
-        # Note: You'll need to find the correct health values for Samurai Showdown
-        # These are placeholders - check the actual game's health system
-        self.full_hp = 100  # Adjust this based on Samurai Showdown's health system
+        # Health tracking - ADJUSTED FOR SAMURAI SHOWDOWN
+        # Based on found data.json: health values are 1-byte unsigned
+        self.full_hp = 128  # Max health from memory address data
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
 
@@ -107,58 +106,24 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked
 
     def _extract_health(self, info):
-        """Extract health from info - STABLE-RETRO VERSION"""
-        # stable-retro might use different key names
-        possible_player_keys = [
-            "agent_hp",
-            "player_hp",
-            "p1_health",
-            "health_p1",
-            "life_p1",
-            "p1_life",
-            "health",
-            "hp",
-            "life",
-            "player_health",
-        ]
-        possible_enemy_keys = [
-            "enemy_hp",
-            "opponent_hp",
-            "p2_health",
-            "health_p2",
-            "life_p2",
-            "p2_life",
-            "enemy_health",
-            "opponent_health",
-        ]
+        """Extract health from info - ONLY health and enemy_health"""
 
-        player_health = self.full_hp
-        opponent_health = self.full_hp
+        # Only use the confirmed memory addresses
+        player_health = info.get("health", self.full_hp)
+        opponent_health = info.get("enemy_health", self.full_hp)
 
-        # Try to find player health
-        for key in possible_player_keys:
-            if key in info:
-                player_health = info[key]
-                break
-
-        # Try to find opponent health
-        for key in possible_enemy_keys:
-            if key in info:
-                opponent_health = info[key]
-                break
-
-        # Debug: Print available keys on first call for stable-retro
+        # Debug: Print available keys on first call for verification
         if not hasattr(self, "_debug_printed"):
-            print(f"🔍 Stable-retro info keys: {list(info.keys())}")
             print(
-                f"   Player health: {player_health}, Opponent health: {opponent_health}"
+                f"🔍 Using only health tracking: health={player_health}, enemy_health={opponent_health}"
             )
+            print(f"   Available info keys: {list(info.keys())}")
             self._debug_printed = True
 
         return player_health, opponent_health
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """Calculate reward based on damage dealt/received"""
+        """Calculate reward based on damage dealt/received - SIMPLIFIED"""
         reward = 0.0
         done = False
 
@@ -167,28 +132,31 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.total_rounds += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # Large win bonus
+                # Win bonus
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
                 print(f"🏆 WIN! {self.wins}/{self.total_rounds} ({win_rate:.1%})")
-                reward += 50  # Win bonus
+                reward += 100  # Large win bonus
             elif curr_player_health <= 0 and curr_opponent_health > 0:
                 # Loss penalty
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
                 print(f"💀 LOSS! {self.wins}/{self.total_rounds} ({win_rate:.1%})")
-                reward -= 50  # Loss penalty
+                reward -= 100  # Large loss penalty
 
             if self.reset_round:
                 done = True
 
-        # Damage-based reward: +1 per damage dealt, -1 per damage received
+        # Damage-based reward: reward for dealing damage, penalty for taking damage
         damage_dealt = max(0, self.prev_opponent_health - curr_opponent_health)
         damage_received = max(0, self.prev_player_health - curr_player_health)
-        reward += damage_dealt - damage_received
 
-        # Small time penalty to encourage aggressive play
-        reward -= 0.01
+        # Reward system focused only on health changes
+        reward += damage_dealt * 2  # +2 per damage dealt
+        reward -= damage_received * 1  # -1 per damage received
+
+        # Small time penalty to encourage active fighting
+        reward -= 0.1
 
         # Update health tracking
         self.prev_player_health = curr_player_health

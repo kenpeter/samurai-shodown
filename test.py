@@ -1,146 +1,137 @@
-import os
-import sys
-import argparse
-import time
+#!/usr/bin/env python3
 
 import retro
-import gymnasium as gym
-from stable_baselines3 import PPO
-from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback
-
-# Import the wrapper
-from wrapper import SamuraiShowdownCustomWrapper
+import os
+import json
 
 
-def create_single_env(game, state, rendering=False):
-    """Create a single environment (no multiprocessing)"""
+def find_retro_data_locations():
+    """Find where stable-retro stores data.json files"""
 
-    env = retro.make(
-        game=game,
-        state=state,
-        use_restricted_actions=retro.Actions.FILTERED,
-        obs_type=retro.Observations.IMAGE,
-        render_mode="human" if rendering else None,
-    )
+    print("🔍 Finding stable-retro data locations...\n")
 
-    env = SamuraiShowdownCustomWrapper(
-        env,
-        reset_round=True,
-        rendering=rendering,
-        max_episode_steps=5000,
-    )
+    # Method 1: Get data path
+    try:
+        data_path = retro.data.get_data_path()
+        print(f"📁 Main retro data path:")
+        print(f"   {data_path}")
+        print()
+    except Exception as e:
+        print(f"❌ Could not get data path: {e}")
 
-    env = Monitor(env)
-    return env
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Simple Samurai Showdown Training Test"
-    )
-    parser.add_argument(
-        "--total-timesteps", type=int, default=10000, help="Total timesteps to train"
-    )
-    parser.add_argument("--render", action="store_true", help="Enable rendering")
-    parser.add_argument(
-        "--use-default-state", action="store_true", help="Use default game state"
-    )
-
-    args = parser.parse_args()
-
+    # Method 2: Check for SamuraiShodown-Genesis specifically
     game = "SamuraiShodown-Genesis"
-
-    # Test if the game works
-    print(f"🎮 Testing {game}...")
     try:
-        test_env = retro.make(
-            game=game,
-            state=None,
-            use_restricted_actions=retro.Actions.FILTERED,
-            obs_type=retro.Observations.IMAGE,
-            render_mode=None,
-        )
-        test_env.close()
-        print(f"✅ Basic environment test passed")
-    except Exception as e:
-        print(f"❌ Basic environment test failed: {e}")
-        return
+        print(f"🎮 Checking for {game} data files...")
 
-    # Handle state
-    if args.use_default_state:
-        state = None
-        print(f"🎮 Using default game state")
-    else:
-        if os.path.exists("samurai.state"):
-            state = "samurai.state"
-            print(f"🎮 Using samurai.state file")
-        else:
-            print(f"❌ samurai.state not found, using default state")
-            state = None
+        # Try to get data.json path
+        try:
+            data_json_path = retro.data.get_file_path(game, "data.json")
+            print(f"✅ data.json found:")
+            print(f"   {data_json_path}")
 
-    # Create single environment (no multiprocessing)
-    print(f"🔧 Creating single environment...")
-    try:
-        env = create_single_env(game, state=state, rendering=args.render)
-        print("✅ Environment created successfully")
+            # Read and display the data.json content
+            if os.path.exists(data_json_path):
+                with open(data_json_path, "r") as f:
+                    data_content = json.load(f)
+                print(f"\n📄 Current data.json content:")
+                print(json.dumps(data_content, indent=2))
 
-        # Test reset
-        obs = env.reset()
-        if isinstance(obs, tuple):
-            obs = obs[0]
-        print(f"✅ Reset successful, obs shape: {obs.shape}")
+        except Exception as e:
+            print(f"❌ data.json not found: {e}")
+
+        # Try to get other files
+        for file_type in ["metadata.json", "scenario.json", "rom.sha"]:
+            try:
+                file_path = retro.data.get_file_path(game, file_type)
+                print(f"✅ {file_type}: {file_path}")
+            except:
+                print(f"❌ {file_type}: Not found")
 
     except Exception as e:
-        print(f"❌ Failed to create environment: {e}")
-        import traceback
+        print(f"❌ Error checking {game}: {e}")
 
-        traceback.print_exc()
-        return
+    print()
 
-    # Create simple PPO model
-    print("🧠 Creating PPO model...")
+    # Method 3: List all available games and their data
     try:
-        model = PPO(
-            "CnnPolicy",
-            env,
-            device="cpu",  # Use CPU for simplicity
-            verbose=1,
-            n_steps=64,  # Small for testing
-            batch_size=64,
-            n_epochs=4,
-            gamma=0.99,
-            learning_rate=3e-4,
-            tensorboard_log="logs_samurai_test",
-        )
-        print("✅ Model created successfully")
-    except Exception as e:
-        print(f"❌ Failed to create model: {e}")
-        import traceback
+        print("📋 Available games with data:")
+        games = retro.data.list_games()
 
-        traceback.print_exc()
-        return
+        # Look for fighting games or similar
+        fighting_games = []
+        for game in games:
+            if any(
+                term in game.lower()
+                for term in ["fight", "street", "samurai", "mortal", "king"]
+            ):
+                fighting_games.append(game)
 
-    # Short training test
-    print(f"🏋️ Starting training for {args.total_timesteps} timesteps...")
-    try:
-        model.learn(total_timesteps=args.total_timesteps)
-        print(f"🎉 Training completed successfully!")
+        print(f"\n🥊 Fighting games found ({len(fighting_games)}):")
+        for game in fighting_games:
+            print(f"   - {game}")
 
-        # Save model
-        model.save("test_samurai_model.zip")
-        print(f"💾 Model saved as test_samurai_model.zip")
+            # Check if this game has data.json
+            try:
+                data_path = retro.data.get_file_path(game, "data.json")
+                print(f"     ✅ Has data.json: {data_path}")
+            except:
+                print(f"     ❌ No data.json")
 
     except Exception as e:
-        print(f"❌ Training failed: {e}")
-        import traceback
+        print(f"❌ Could not list games: {e}")
 
-        traceback.print_exc()
-    finally:
-        env.close()
 
-    print("✅ Test complete!")
+def check_retro_installation():
+    """Check retro installation details"""
+    print("\n🔧 Retro installation info:")
+    try:
+        print(f"   Version: {retro.__version__}")
+        print(f"   Location: {retro.__file__}")
+    except:
+        print("   Could not get version info")
+
+
+def find_example_data_json():
+    """Find an example data.json from any game"""
+    print("\n📖 Looking for example data.json files...")
+
+    try:
+        games = retro.data.list_games()
+        for game in games[:10]:  # Check first 10 games
+            try:
+                data_path = retro.data.get_file_path(game, "data.json")
+                print(f"\n✅ Example from {game}:")
+                print(f"   Path: {data_path}")
+
+                # Show content
+                with open(data_path, "r") as f:
+                    content = json.load(f)
+
+                if "info" in content:
+                    print("   Info variables:")
+                    for key, value in content["info"].items():
+                        if isinstance(value, dict) and "address" in value:
+                            print(f"     {key}: {value}")
+
+                break  # Show just one example
+
+            except:
+                continue
+
+    except Exception as e:
+        print(f"❌ Could not find examples: {e}")
 
 
 if __name__ == "__main__":
-    main()
+    print("🎌 Stable-Retro Data Location Finder\n")
+
+    find_retro_data_locations()
+    check_retro_installation()
+    find_example_data_json()
+
+    print("\n💡 Next steps:")
+    print("1. If SamuraiShodown-Genesis has no data.json, you need to create one")
+    print("2. Check other fighting games for memory address examples")
+    print("3. Use memory scanning tools to find the correct addresses")
+    print("4. Copy/modify an existing data.json as a template")
