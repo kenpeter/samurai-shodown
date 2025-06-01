@@ -66,7 +66,7 @@ def main():
         "--num-envs", type=int, default=38, help="Number of parallel environments"
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=1e-3, help="Learning rate"
+        "--learning-rate", type=float, default=2e-3, help="Learning rate"
     )
     parser.add_argument(
         "--resume", type=str, default=None, help="Resume from saved model path"
