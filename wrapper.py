@@ -55,7 +55,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Logging configuration
         self.log_interval = 300  # Log every 5 minutes instead of 1 minute
 
-        # Get frame dimensions
+        # Get frame dimensions and calculate target size
         dummy_obs = self.env.reset()
         if isinstance(dummy_obs, tuple):
             actual_obs = dummy_obs[0]
@@ -66,6 +66,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.target_height = int(original_height * self.resize_scale)
         self.target_width = int(original_width * self.resize_scale)
 
+        # FIXED: Proper observation space definition
         self.observation_space = gym.spaces.Box(
             low=0,
             high=255,
@@ -74,6 +75,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         )
 
         print(f"🚀 {self.env_id} Samurai Showdown Wrapper initialized")
+        print(f"   Original size: {original_height}x{original_width}")
+        print(f"   Target size: {self.target_height}x{self.target_width}")
+        print(f"   Observation shape: {self.observation_space.shape}")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -95,16 +99,21 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
     def _stack_observation(self):
         """Stack frames in channels-first format"""
-        while len(self.frame_stack) < self.num_frames:
-            if len(self.frame_stack) > 0:
-                self.frame_stack.append(self.frame_stack[-1].copy())
+        # FIXED: Proper frame stacking with padding
+        frames_list = list(self.frame_stack)
+
+        # If we don't have enough frames, pad with the first available frame
+        while len(frames_list) < self.num_frames:
+            if len(frames_list) > 0:
+                frames_list.insert(0, frames_list[0].copy())  # Pad at beginning
             else:
+                # Create zero frame if no frames available
                 dummy_frame = np.zeros(
                     (self.target_height, self.target_width), dtype=np.uint8
                 )
-                self.frame_stack.append(dummy_frame)
+                frames_list.append(dummy_frame)
 
-        stacked = np.stack(list(self.frame_stack), axis=0)
+        stacked = np.stack(frames_list, axis=0)
         return stacked
 
     def _extract_health(self, info):
@@ -217,22 +226,25 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
 
+        # FIXED: Proper frame stack initialization
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
 
-        for _ in range(self.num_frames):
-            self.frame_stack.append(processed_frame.copy())
+        # Start with the current frame
+        self.frame_stack.append(processed_frame.copy())
+
+        # Fill remaining slots with zero frames for proper motion detection
+        for _ in range(self.num_frames - 1):
+            zero_frame = np.zeros_like(processed_frame)
+            self.frame_stack.append(zero_frame)
 
         stacked_obs = self._stack_observation()
         return stacked_obs, info
 
     def step(self, action):
         """Step function"""
-        if isinstance(action, np.ndarray) and action.ndim == 0:
-            binary_action = np.zeros(self.env.action_space.n, dtype=int)
-            if 0 <= action < self.env.action_space.n:
-                binary_action[action] = 1
-            action = binary_action
+        # FIXED: Remove problematic action conversion - retro handles discrete actions
+        # The original action conversion was causing issues
 
         observation, reward, done, truncated, info = self.env.step(action)
 
