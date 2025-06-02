@@ -122,7 +122,7 @@ def main():
         help="Number of parallel environments (default: 84)",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=2e-3, help="Learning rate"
+        "--learning-rate", type=float, default=4e-3, help="Learning rate"
     )
     parser.add_argument(
         "--resume", type=str, default=None, help="Resume from saved model path"

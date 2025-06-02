@@ -3,6 +3,7 @@ import gymnasium as gym
 import numpy as np
 import time
 from datetime import datetime
+import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
@@ -178,6 +179,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
+                reward += 1
+
+                self.prev_player_health = curr_player_health
+                self.prev_opponent_health = curr_opponent_health
+                return reward, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
                 # LOSS
@@ -194,19 +200,17 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
+                reward += -1
+
+                self.prev_player_health = curr_player_health
+                self.prev_opponent_health = curr_opponent_health
+                return reward, True
 
             if self.reset_round:
                 done = True
 
             # Check if it's time to log periodic stats
             self._log_periodic_stats()
-
-        # Damage-based rewards
-        damage_dealt = max(0, self.prev_opponent_health - curr_opponent_health)
-        damage_received = max(0, self.prev_player_health - curr_player_health)
-
-        reward += damage_dealt * 1
-        reward -= damage_received * 1
 
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
