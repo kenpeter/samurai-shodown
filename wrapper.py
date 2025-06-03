@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Samurai Showdown wrapper with simple console win rate logging"""
+    """Samurai Showdown wrapper with simple console win rate logging and jump prevention"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -37,6 +37,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.max_episode_steps = max_episode_steps
         self.episode_steps = 0
         self.reset_round = reset_round
+
+        # JUMP PREVENTION - Simple addition
+        self.jump_cooldown = 0
+        self.max_jump_cooldown = 30  # Prevent jumping for 30 frames after a jump
+        self.jump_actions = [
+            7,
+            8,
+            9,
+        ]  # Assuming these are jump actions (up, up-left, up-right)
 
         # Environment tracking
         import random
@@ -79,6 +88,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"   Original size: {original_height}x{original_width}")
         print(f"   Target size: {self.target_height}x{self.target_width}")
         print(f"   Observation shape: {self.observation_space.shape}")
+        print(f"   Jump prevention: {self.max_jump_cooldown} frame cooldown")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -230,6 +240,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
 
+        # Reset jump cooldown
+        self.jump_cooldown = 0
+
         # FIXED: Proper frame stack initialization
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
@@ -246,9 +259,39 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """Step function"""
-        # FIXED: Remove problematic action conversion - retro handles discrete actions
-        # The original action conversion was causing issues
+        """Step function with jump prevention"""
+        # JUMP PREVENTION: Robust action handling
+        try:
+            # Handle different action formats
+            if hasattr(action, "shape") and action.shape == ():
+                # Scalar numpy array
+                action_int = int(action)
+            elif hasattr(action, "__len__") and len(action) == 1:
+                # Single element array/list
+                action_int = int(action[0])
+            elif hasattr(action, "item"):
+                # Try .item() for numpy arrays
+                action_int = action.item()
+            else:
+                # Direct conversion
+                action_int = int(action)
+        except (ValueError, IndexError):
+            # Fallback: just use the action as-is and skip jump prevention
+            action_int = None
+
+        # Only apply jump prevention if we successfully extracted action
+        if action_int is not None:
+            # Decrease jump cooldown
+            if self.jump_cooldown > 0:
+                self.jump_cooldown -= 1
+
+            # If trying to jump while in cooldown, convert to neutral action
+            if action_int in self.jump_actions and self.jump_cooldown > 0:
+                action = 0  # Neutral/no-op action
+
+            # If executing a jump action, start cooldown
+            elif action_int in self.jump_actions:
+                self.jump_cooldown = self.max_jump_cooldown
 
         observation, reward, done, truncated, info = self.env.step(action)
 
