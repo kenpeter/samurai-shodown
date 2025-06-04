@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Samurai Showdown wrapper with simple console win rate logging and jump prevention"""
+    """Samurai Showdown wrapper with simple console win rate logging and improved defense"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -38,14 +38,16 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.episode_steps = 0
         self.reset_round = reset_round
 
-        # JUMP PREVENTION - Simple addition
+        # IMPROVED DEFENSE SYSTEM - Less restrictive jump prevention
         self.jump_cooldown = 0
-        self.max_jump_cooldown = 60  # Prevent jumping for 30 frames after a jump
-        self.jump_actions = [
-            7,
-            8,
-            9,
-        ]  # Assuming these are jump actions (up, up-left, up-right)
+        self.max_jump_cooldown = 20  # Reduced from 60 to 20 frames
+        self.jump_actions = [7, 8, 9]  # up, up-left, up-right
+
+        # Add defensive action tracking for rewards
+        self.defensive_actions = [4, 1]  # back block (4), crouch block (1)
+        self.last_action = 0
+        self.consecutive_blocks = 0
+        self.max_consecutive_blocks = 3  # Encourage some offense after blocking
 
         # Environment tracking
         import random
@@ -89,6 +91,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"   Target size: {self.target_height}x{self.target_width}")
         print(f"   Observation shape: {self.observation_space.shape}")
         print(f"   Jump prevention: {self.max_jump_cooldown} frame cooldown")
+        print(f"   Defense encouraged: block limit {self.max_consecutive_blocks}")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -165,9 +168,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """Calculate reward and track wins/losses"""
+        """Calculate reward and track wins/losses with defensive bonuses"""
         reward = 0.0
         done = False
+
+        # Small defensive bonus for successful blocking (health preservation)
+        health_diff = curr_player_health - self.prev_player_health
+        if health_diff == 0 and self.last_action in self.defensive_actions:
+            reward += 0.1  # Small reward for maintaining health while defending
 
         # Check for round end
         if curr_player_health <= 0 or curr_opponent_health <= 0:
@@ -189,7 +197,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
-                reward += 2
+                reward += 1
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
@@ -240,8 +248,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
 
-        # Reset jump cooldown
+        # Reset defensive tracking
         self.jump_cooldown = 0
+        self.last_action = 0
+        self.consecutive_blocks = 0
 
         # FIXED: Proper frame stack initialization
         self.frame_stack.clear()
@@ -259,39 +269,52 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """Step function with jump prevention"""
-        # JUMP PREVENTION: Robust action handling
+        """Step function with improved defense system"""
+        # IMPROVED DEFENSE: Less restrictive action handling
         try:
             # Handle different action formats
             if hasattr(action, "shape") and action.shape == ():
-                # Scalar numpy array
                 action_int = int(action)
             elif hasattr(action, "__len__") and len(action) == 1:
-                # Single element array/list
                 action_int = int(action[0])
             elif hasattr(action, "item"):
-                # Try .item() for numpy arrays
                 action_int = action.item()
             else:
-                # Direct conversion
                 action_int = int(action)
         except (ValueError, IndexError):
-            # Fallback: just use the action as-is and skip jump prevention
             action_int = None
 
-        # Only apply jump prevention if we successfully extracted action
+        # Apply improved defense logic
         if action_int is not None:
             # Decrease jump cooldown
             if self.jump_cooldown > 0:
                 self.jump_cooldown -= 1
 
-            # If trying to jump while in cooldown, convert to neutral action
-            if action_int in self.jump_actions and self.jump_cooldown > 0:
-                action = 0  # Neutral/no-op action
+            # Track consecutive blocking
+            if action_int in self.defensive_actions:
+                if self.last_action in self.defensive_actions:
+                    self.consecutive_blocks += 1
+                else:
+                    self.consecutive_blocks = 1
+            else:
+                self.consecutive_blocks = 0
 
-            # If executing a jump action, start cooldown
+            # Less restrictive jump prevention
+            if action_int in self.jump_actions and self.jump_cooldown > 0:
+                action = 4  # Convert to back block instead of neutral
             elif action_int in self.jump_actions:
                 self.jump_cooldown = self.max_jump_cooldown
+
+            # Encourage offense after too much blocking
+            if (
+                self.consecutive_blocks > self.max_consecutive_blocks
+                and action_int in self.defensive_actions
+            ):
+                # Occasionally convert excessive blocking to forward movement
+                if np.random.random() < 0.3:  # 30% chance
+                    action = 6  # Forward action
+
+            self.last_action = action_int
 
         observation, reward, done, truncated, info = self.env.step(action)
 
