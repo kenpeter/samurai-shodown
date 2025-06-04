@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Samurai Showdown wrapper with simple console win rate logging and improved defense"""
+    """Samurai Showdown wrapper with normalized rewards for stable learning"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -38,16 +38,23 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.episode_steps = 0
         self.reset_round = reset_round
 
-        # IMPROVED DEFENSE SYSTEM - Less restrictive jump prevention
+        # NORMALIZED DEFENSE SYSTEM for stable learning + high win rate
         self.jump_cooldown = 0
-        self.max_jump_cooldown = 20  # Reduced from 60 to 20 frames
+        self.max_jump_cooldown = 10  # Very short cooldown
         self.jump_actions = [7, 8, 9]  # up, up-left, up-right
 
-        # Add defensive action tracking for rewards
-        self.defensive_actions = [4, 1]  # back block (4), crouch block (1)
+        # Comprehensive defensive actions
+        self.defensive_actions = [4, 1, 3]  # back (4), down (1), down-back (3)
+        self.safe_actions = [0, 1, 3, 4]  # neutral, down, down-back, back
+        self.risky_actions = [2, 5, 6, 7, 8, 9]  # forward moves and jumps
         self.last_action = 0
         self.consecutive_blocks = 0
-        self.max_consecutive_blocks = 3  # Encourage some offense after blocking
+        self.max_consecutive_blocks = 8  # Allow much more defensive play
+
+        # Enhanced tracking
+        self.damage_taken_this_step = 0
+        self.safe_action_streak = 0
+        self.rounds_without_loss = 0
 
         # Environment tracking
         import random
@@ -92,6 +99,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"   Observation shape: {self.observation_space.shape}")
         print(f"   Jump prevention: {self.max_jump_cooldown} frame cooldown")
         print(f"   Defense encouraged: block limit {self.max_consecutive_blocks}")
+        print(f"   NORMALIZED REWARDS: Defense +0.3, Win +1.0-1.7, Loss -1.0")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -168,14 +176,47 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """Calculate reward and track wins/losses with defensive bonuses"""
+        """Calculate NORMALIZED reward with strong defensive bonuses for stable learning"""
         reward = 0.0
         done = False
 
-        # Small defensive bonus for successful blocking (health preservation)
-        health_diff = curr_player_health - self.prev_player_health
-        if health_diff == 0 and self.last_action in self.defensive_actions:
-            reward += 0.1  # Small reward for maintaining health while defending
+        # Calculate damage taken this step
+        self.damage_taken_this_step = self.prev_player_health - curr_player_health
+        damage_dealt = self.prev_opponent_health - curr_opponent_health
+
+        # NORMALIZED defensive rewards (0.0 to 1.0 range)
+        if (
+            self.damage_taken_this_step == 0
+            and self.last_action in self.defensive_actions
+        ):
+            reward += 0.3  # Strong reward for successful defense
+
+        # Reward for avoiding damage
+        if self.damage_taken_this_step == 0:
+            reward += 0.1
+            self.safe_action_streak += 1
+
+        # Streak bonus for consecutive safe play (capped)
+        if self.safe_action_streak > 10:
+            reward += min(0.05, self.safe_action_streak * 0.005)  # Small capped bonus
+
+        # Reset streak if damage taken
+        if self.damage_taken_this_step > 0:
+            self.safe_action_streak = 0
+            # Normalized damage penalty (0 to -0.5 max)
+            damage_ratio = self.damage_taken_this_step / self.full_hp
+            reward -= damage_ratio * 0.5
+
+        # Small reward for dealing damage
+        if damage_dealt > 0:
+            damage_ratio = damage_dealt / self.full_hp
+            reward += damage_ratio * 0.2
+
+        # Health advantage bonus (small)
+        health_advantage = curr_player_health - curr_opponent_health
+        if health_advantage > 20:
+            advantage_ratio = min(health_advantage / self.full_hp, 0.5)
+            reward += advantage_ratio * 0.1
 
         # Check for round end
         if curr_player_health <= 0 or curr_opponent_health <= 0:
@@ -183,9 +224,18 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # WIN
+                # WIN - normalized reward
+                health_bonus = (curr_player_health / self.full_hp) * 0.5  # 0 to 0.5
                 self.wins += 1
+                self.rounds_without_loss += 1
                 win_rate = self.wins / self.total_rounds
+
+                # Win streak bonus (small and capped)
+                if self.rounds_without_loss > 3:
+                    streak_bonus = min(self.rounds_without_loss * 0.02, 0.2)  # Max 0.2
+                else:
+                    streak_bonus = 0
+
                 SamuraiShowdownCustomWrapper._global_stats["total_wins"] += 1
                 SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
                     "wins"
@@ -195,17 +245,19 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 ] = self.total_rounds
 
                 print(
-                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%}) HP:{curr_player_health} Streak:{self.rounds_without_loss}"
                 )
-                reward += 1
+                # Total win reward: 1.0 + health_bonus + streak_bonus (max ~1.7)
+                reward += 1.0 + health_bonus + streak_bonus
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
                 return reward, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                # LOSS
+                # LOSS - normalized penalty
                 self.losses += 1
+                self.rounds_without_loss = 0  # Reset streak
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
                 SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
@@ -218,7 +270,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
-                reward += -1
+                reward -= 1.0  # Fixed loss penalty
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
@@ -233,6 +285,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
 
+        # Clip final reward to reasonable range
+        reward = np.clip(reward, -1.5, 2.0)
         return reward, done
 
     def reset(self, **kwargs):
@@ -252,6 +306,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.jump_cooldown = 0
         self.last_action = 0
         self.consecutive_blocks = 0
+        self.damage_taken_this_step = 0
+        self.safe_action_streak = 0
 
         # FIXED: Proper frame stack initialization
         self.frame_stack.clear()
@@ -269,7 +325,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """Step function with improved defense system"""
+        """Step function with NORMALIZED aggressive defense system"""
         # IMPROVED DEFENSE: Less restrictive action handling
         try:
             # Handle different action formats
@@ -284,7 +340,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError):
             action_int = None
 
-        # Apply improved defense logic
+        # Apply AGGRESSIVE defense logic with normalized rewards
         if action_int is not None:
             # Decrease jump cooldown
             if self.jump_cooldown > 0:
@@ -299,20 +355,29 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             else:
                 self.consecutive_blocks = 0
 
-            # Less restrictive jump prevention
+            # AGGRESSIVE action filtering - heavily favor safe actions
+            if action_int in self.risky_actions:
+                # 80% chance to convert risky actions to safe ones
+                if np.random.random() < 0.8:
+                    if action_int in self.jump_actions:
+                        action = 4  # Convert jumps to back
+                    elif action_int in [2, 5, 6]:  # Forward actions
+                        action = 4  # Convert forward to back
+
+            # Prevent jumping during cooldown
             if action_int in self.jump_actions and self.jump_cooldown > 0:
-                action = 4  # Convert to back block instead of neutral
+                action = 4  # Always convert to back
             elif action_int in self.jump_actions:
                 self.jump_cooldown = self.max_jump_cooldown
 
-            # Encourage offense after too much blocking
+            # Allow long defensive sequences
             if (
                 self.consecutive_blocks > self.max_consecutive_blocks
                 and action_int in self.defensive_actions
             ):
-                # Occasionally convert excessive blocking to forward movement
-                if np.random.random() < 0.3:  # 30% chance
-                    action = 6  # Forward action
+                # Only occasionally break defensive play
+                if np.random.random() < 0.1:  # 10% chance
+                    action = 0  # Neutral action
 
             self.last_action = action_int
 
