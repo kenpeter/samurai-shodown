@@ -40,7 +40,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # JUMP PREVENTION - Simple addition
         self.jump_cooldown = 0
-        self.max_jump_cooldown = 30  # Prevent jumping for 30 frames after a jump
+        self.max_jump_cooldown = 60  # Prevent jumping for 30 frames after a jump
         self.jump_actions = [
             7,
             8,
@@ -189,7 +189,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
-                reward += 1
+                reward += 2
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
