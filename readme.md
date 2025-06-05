@@ -4,11 +4,11 @@
 
 
 
-python train.py --resume trained_models_samurai/ppo_samurai_4env_60000384_steps.zip --render --total-timesteps 10000000  --learning-rate 4*e-3
+python train.py --resume trained_models_samurai/ppo_samurai_final_4env.zip --render --total-timesteps 10000000  --learning-rate 3e-3
 
 
 
-python train.py --render --total-timesteps 10000000
+python train.py --render --total-timesteps 10000000 --num-envs 12
 
 
 

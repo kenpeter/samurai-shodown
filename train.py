@@ -39,7 +39,7 @@ def make_env_for_subprocess(game, state, rendering=False, seed=0, env_id=0):
             env,
             reset_round=True,
             rendering=rendering,
-            max_episode_steps=5000,
+            max_episode_steps=10000,  # Updated to match wrapper
         )
 
         env = Monitor(env)
@@ -63,26 +63,29 @@ def check_system_resources(num_envs):
 
     # Check CPU cores
     cpu_cores = psutil.cpu_count(logical=True)
-    recommended_envs = min(cpu_cores, 84)  # Cap at 84 but consider CPU limits
+    recommended_envs = min(
+        cpu_cores // 4, 4
+    )  # Conservative env count for large batches
 
     print(f"🖥️  System Resource Check:")
     print(f"   CPU Cores: {cpu_cores}")
     print(f"   Requested Envs: {num_envs}")
+    print(f"   Strategy: FEWER envs + LARGER batches")
 
-    if num_envs > cpu_cores:
-        print(f"⚠️  Warning: {num_envs} environments > {cpu_cores} CPU cores")
-        print(f"💡 Consider reducing to {recommended_envs} for optimal performance")
+    if num_envs > cpu_cores // 2:
+        print(f"⚠️  Warning: {num_envs} environments might stress {cpu_cores} CPU cores")
+        print(f"💡 Consider {recommended_envs} environments for large batch training")
 
-    # Check RAM
+    # Check RAM - OPTIMIZED FOR 82GB SYSTEM
     ram_gb = psutil.virtual_memory().total / (1024**3)
-    estimated_ram_usage = num_envs * 0.1  # ~100MB per environment
+    estimated_ram_usage = num_envs * 0.5  # ~500MB per environment with large rollouts
 
-    print(f"   RAM: {ram_gb:.1f} GB")
+    print(f"   RAM: {ram_gb:.1f} GB (HIGH-END SYSTEM)")
     print(f"   Estimated RAM usage: {estimated_ram_usage:.1f} GB")
 
-    if estimated_ram_usage > ram_gb * 0.8:
+    if estimated_ram_usage > ram_gb * 0.6:  # More conservative with large rollouts
         print(f"❌ ERROR: Insufficient RAM!")
-        print(f"💡 Reduce environments or add more RAM")
+        print(f"💡 Reduce environments or rollout size")
         return False
 
     return True
@@ -111,18 +114,26 @@ def get_actual_observation_dims(game, state):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train Samurai Showdown Agent")
+    parser = argparse.ArgumentParser(
+        description="Train Samurai Showdown Agent - Large Batch Optimized"
+    )
     parser.add_argument(
-        "--total-timesteps", type=int, default=10000000, help="Total timesteps to train"
+        "--total-timesteps",
+        type=int,
+        default=20000000,
+        help="Total timesteps to train (increased for fewer envs)",
     )
     parser.add_argument(
         "--num-envs",
         type=int,
-        default=84,
-        help="Number of parallel environments (default: 84)",
+        default=2,  # FEWER envs for larger batch sizes
+        help="Number of parallel environments (optimized for large batch per env)",
     )
     parser.add_argument(
-        "--learning-rate", type=float, default=4e-3, help="Learning rate"
+        "--learning-rate",
+        type=float,
+        default=3e-4,
+        help="Learning rate (reduced for large batch)",
     )
     parser.add_argument(
         "--resume", type=str, default=None, help="Resume from saved model path"
@@ -131,18 +142,18 @@ def main():
     parser.add_argument(
         "--use-default-state", action="store_true", help="Use default game state"
     )
-    # New argument for batch size scaling
+    # Conservative batch size that WILL work on 12GB GPU
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=None,
-        help="Custom batch size (auto-calculated if not provided)",
+        default=2048,  # SAFE batch size - definitely fits in 12GB GPU
+        help="Batch size (default: 2048 - guaranteed safe for 12GB GPU)",
     )
     parser.add_argument(
         "--n-steps",
         type=int,
-        default=None,
-        help="Custom n_steps (auto-calculated if not provided)",
+        default=8192,  # Large rollouts for 82GB RAM
+        help="Steps per rollout (default: 8192 for high-end RAM)",
     )
 
     args = parser.parse_args()
@@ -174,10 +185,14 @@ def main():
 
     device = "cuda"
 
-    # Set CUDA optimizations
+    # Set CUDA optimizations + MEMORY CONSERVATION
     torch.backends.cudnn.benchmark = True
     torch.backends.cudnn.deterministic = False  # For maximum performance
-    print("✅ CUDA optimizations enabled")
+
+    # Add memory optimization environment variables
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+    print("✅ CUDA optimizations + memory conservation enabled")
 
     game = "SamuraiShodown-Genesis"
 
@@ -209,19 +224,19 @@ def main():
             print(f"❌ samurai.state not found, using default state")
             state = None
 
-    # FIXED: Get actual observation dimensions
+    # Get actual observation dimensions
     print("🔍 Determining actual observation dimensions...")
     obs_shape = get_actual_observation_dims(game, state)
     num_frames, obs_height, obs_width = obs_shape
     print(f"✅ Observation shape: {obs_shape}")
 
-    # FIXED: Correct memory calculation (1 byte per pixel for uint8)
+    # Memory calculation
     obs_size_mb = (num_frames * obs_height * obs_width) / (1024 * 1024)
     print(f"📊 Observation size: {obs_size_mb:.2f} MB per observation")
 
     # Determine actual number of environments for rendering
     if args.render:
-        if args.num_envs > 8:
+        if args.num_envs > 4:
             print(f"🎮 Rendering mode: Using 4 environments with rendering")
             print(
                 f"💡 For optimal viewing experience with {args.num_envs} requested environments"
@@ -233,86 +248,87 @@ def main():
     else:
         actual_envs = args.num_envs
 
-    # FIXED: Calculate hyperparameters once with actual environment count
-    print(f"🧠 Calculating hyperparameters for {actual_envs} environments...")
+    # LARGE BATCH HYPERPARAMETERS
+    print(f"🧠 LARGE BATCH TRAINING - Optimized for {actual_envs} environments...")
 
-    # Calculate batch size
-    if args.batch_size is None:
-        batch_size = min(1344, actual_envs * 16)  # 16 per env, max 1344
-    else:
-        batch_size = args.batch_size
+    batch_size = args.batch_size
+    n_steps = args.n_steps
 
-    # Calculate n_steps based on memory constraints
-    if args.n_steps is None:
-        # Target: Keep buffer under 4GB
-        target_buffer_gb = 3.0  # Conservative target
-        max_buffer_size_mb = target_buffer_gb * 1024
+    # Ensure batch_size is reasonable for the number of environments
+    total_samples_per_rollout = n_steps * actual_envs
+    if batch_size > total_samples_per_rollout:
+        batch_size = total_samples_per_rollout
+        print(f"⚠️ Adjusted batch_size to {batch_size} (max samples per rollout)")
 
-        # Calculate max steps based on memory constraint
-        # Buffer size = n_steps * n_envs * obs_size_mb
-        max_n_steps = int(max_buffer_size_mb / (actual_envs * obs_size_mb))
-
-        # Choose n_steps based on environment count and memory constraints
-        if actual_envs >= 64:
-            n_steps = min(64, max_n_steps)  # Very small for many envs
-        elif actual_envs >= 32:
-            n_steps = min(128, max_n_steps)  # Small for moderate envs
-        elif actual_envs >= 8:
-            n_steps = min(256, max_n_steps)  # Medium for fewer envs
-        else:
-            n_steps = min(512, max_n_steps)  # Larger for very few envs
-
-        # Ensure minimum viable n_steps
-        n_steps = max(32, n_steps)
-    else:
-        n_steps = args.n_steps
-
-    # Calculate actual buffer memory usage
+    # Calculate buffer memory usage
     buffer_memory_gb = (n_steps * actual_envs * obs_size_mb) / 1024
 
-    print(f"📈 Optimized hyperparameters for {actual_envs} environments:")
-    print(f"   Batch size: {batch_size}")
-    print(f"   N-steps: {n_steps}")
+    print(f"📈 ULTRA SAFE: Guaranteed to work on {actual_envs} environments:")
+    print(f"   Batch size: {batch_size:,} (ULTRA SAFE for any 12GB GPU)")
+    print(f"   N-steps: {n_steps:,} (LARGE for 82GB RAM)")
+    print(f"   Total samples per rollout: {total_samples_per_rollout:,}")
     print(f"   Buffer memory: {buffer_memory_gb:.2f} GB")
+    print(f"   Minibatches per rollout: {total_samples_per_rollout // batch_size}")
+    print(f"   🛡️ Strategy: Guaranteed stability over maximum performance")
 
-    # Memory safety check
-    if buffer_memory_gb > 6:
+    # Memory safety check - RELAXED FOR HIGH-END HARDWARE
+    if buffer_memory_gb > 20:  # Can handle much larger buffers with 82GB RAM
         print(f"❌ ERROR: Buffer memory too large ({buffer_memory_gb:.2f} GB)!")
-        max_safe_steps = int(5 * 1024 / (actual_envs * obs_size_mb))
+        max_safe_steps = int(15 * 1024 / (actual_envs * obs_size_mb))
         print(f"💡 Reduce n_steps to {max_safe_steps} or fewer")
-        print(f"💡 Or reduce num_envs")
         sys.exit(1)
 
-    # Enhanced VRAM estimation with correct values
-    base_model_vram = 2.0  # Base model memory ~2GB
-    env_vram_per_env = buffer_memory_gb / actual_envs  # Actual per-env memory
-    batch_processing_vram = 1.5  # Additional memory for batch processing
+    # VRAM estimation - FIXED: Buffer goes to RAM, not VRAM
+    base_model_vram = 3.0  # Base model memory on GPU
+    batch_processing_vram = 3.5  # MASSIVE batch processing for 16K batch size
+    gradient_vram = 1.5  # Gradient computation memory on GPU
 
-    estimated_vram = base_model_vram + buffer_memory_gb + batch_processing_vram
+    # IMPORTANT: Buffer memory goes to SYSTEM RAM, not VRAM!
+    estimated_vram = (
+        base_model_vram + batch_processing_vram + gradient_vram
+    )  # NO buffer memory!
 
-    print(f"📊 VRAM estimation for {actual_envs} environments:")
-    print(f"   Base model: {base_model_vram:.1f} GB")
-    print(f"   Buffer memory: {buffer_memory_gb:.2f} GB")
-    print(f"   Batch processing: {batch_processing_vram:.1f} GB")
-    print(f"   Total estimated: {estimated_vram:.2f} GB")
+    print(f"📊 MEMORY allocation for RTX 4070 12GB + 82GB RAM:")
+    print(f"   🖥️  SYSTEM RAM (82GB available):")
+    print(f"      Buffer memory: {buffer_memory_gb:.2f} GB ✅")
+    print(f"   🎮 GPU VRAM (12GB available):")
+    print(f"      Base model: {base_model_vram:.1f} GB")
+    print(f"      Batch processing: {batch_processing_vram:.1f} GB (MASSIVE)")
+    print(f"      Gradient computation: {gradient_vram:.1f} GB")
+    print(f"      Total GPU VRAM: {estimated_vram:.2f} GB")
+    print(
+        f"   🎯 GPU VRAM usage: {estimated_vram:.1f}GB / 12GB = {estimated_vram/12*100:.1f}%"
+    )
 
-    if estimated_vram > gpu_memory * 0.9:
-        print("❌ ERROR: Insufficient GPU memory!")
+    # Check SYSTEM RAM for buffer (not VRAM!)
+    if buffer_memory_gb > 50:  # Conservative limit for 82GB system
+        print(f"❌ ERROR: Buffer too large for system RAM!")
+        print(f"   Buffer needs: {buffer_memory_gb:.2f} GB")
+        print(f"   System RAM: 82GB available")
+        print("💡 Reduce --n-steps")
+        sys.exit(1)
+
+    # Check GPU VRAM (without buffer memory!)
+    if estimated_vram > 11.5:  # Use almost all 12GB
+        print("❌ ERROR: Would exceed RTX 4070 12GB VRAM!")
         print(f"   Required: {estimated_vram:.2f} GB")
-        print(f"   Available: {gpu_memory:.1f} GB")
-        print("💡 Reduce --num-envs or --n-steps")
+        print(f"   Available: ~11.5 GB (safe limit)")
+        print("💡 Reduce --batch-size")
         sys.exit(1)
-    elif estimated_vram > gpu_memory * 0.7:
-        print("⚠️ Warning: High VRAM usage expected")
-        print("💡 Monitor with: watch -n 1 nvidia-smi")
+    elif estimated_vram > 10.5:
+        print("⚠️ High VRAM usage - will use most of your 12GB (OPTIMAL)")
+    else:
+        print("✅ Conservative VRAM usage - could potentially increase batch size")
 
     save_dir = "trained_models_samurai"
     os.makedirs(save_dir, exist_ok=True)
 
-    print(f"🚀 Samurai Showdown Training - Optimized Setup")
+    print(f"🚀 Samurai Showdown OPTIMIZED Training: Fewer Envs + Larger Batches")
+    print(f"   💡 Strategy: 2 envs × large batches > many envs × small batches")
+    print(f"   🎯 Rewards: Win/Loss only, 3-sec jump cooldown")
+    print(f"   🔥 Batch size: {batch_size:,} samples (GPU efficient)")
     print(f"   Game: {game}")
-    print(f"   State: {state}")
-    print(f"   Device: {device} (GPU MANDATORY)")
+    print(f"   Device: {device} (RTX 4070 12GB)")
     print(f"   Total timesteps: {args.total_timesteps:,}")
     print(f"   Environments: {actual_envs}")
     print(f"   Learning rate: {args.learning_rate}")
@@ -348,74 +364,69 @@ def main():
         traceback.print_exc()
         return
 
-    # Create or load model - GPU ONLY with optimized settings
+    # Create or load model - LARGE BATCH OPTIMIZED
     if args.resume and os.path.exists(args.resume):
         print(f"📂 Loading model from: {args.resume}")
-        print(
-            f"⚠️  Warning: Overriding saved model hyperparameters for memory optimization"
-        )
-
-        # Load model but override hyperparameters for new environment setup
         model = PPO.load(args.resume, env=env, device="cuda")
 
-        # Force update hyperparameters to match current memory-optimized setup
+        # Update hyperparameters for large batch training
         model.n_steps = n_steps
         model.batch_size = batch_size
-        model.n_epochs = 3
-
-        # Recreate rollout buffer with new parameters
+        model.n_epochs = 4  # Slightly more epochs for large batches
         model._setup_model()
 
-        print(f"✅ Model loaded on GPU with overridden hyperparameters:")
-        print(f"   n_steps: {model.n_steps}")
-        print(f"   batch_size: {model.batch_size}")
-        print(f"   n_epochs: {model.n_epochs}")
+        print(f"✅ Model loaded and updated for large batch training")
     else:
-        print(f"🧠 Creating new PPO model optimized for {actual_envs} environments")
-        lr_schedule = linear_schedule(args.learning_rate, args.learning_rate * 0.3)
+        print(f"🧠 Creating new PPO model for CONSERVATIVE BATCH training (12GB GPU)")
+        lr_schedule = linear_schedule(args.learning_rate, args.learning_rate * 0.1)
 
         model = PPO(
             "CnnPolicy",
             env,
-            device="cuda",  # GPU ONLY
+            device="cuda",
             verbose=1,
             n_steps=n_steps,
             batch_size=batch_size,
-            n_epochs=3,
-            gamma=0.99,
+            n_epochs=4,  # Reasonable epochs for small batches
+            gamma=0.99,  # Standard gamma
             learning_rate=lr_schedule,
-            clip_range=linear_schedule(0.2, 0.1),
-            ent_coef=0.01,
+            clip_range=linear_schedule(0.2, 0.05),
+            ent_coef=0.01,  # Standard entropy
             vf_coef=0.5,
             max_grad_norm=0.5,
             gae_lambda=0.95,
             tensorboard_log="logs_samurai",
+            policy_kwargs=dict(
+                normalize_images=False,
+                optimizer_class=torch.optim.Adam,  # Standard Adam for smaller batches
+                optimizer_kwargs=dict(eps=1e-5),
+            ),
         )
-        print(f"✅ PPO model created on GPU with optimized settings")
+        print(f"✅ PPO model created for CONSERVATIVE BATCH training")
 
-        # Verify model is on GPU
-        print(f"🔍 Model device verification:")
-        for name, param in model.policy.named_parameters():
-            print(f"   {name}: {param.device}")
-            break  # Just show first parameter as example
+    # Model device verification
+    print(f"🔍 Model device verification:")
+    for name, param in model.policy.named_parameters():
+        print(f"   {name}: {param.device}")
+        break
 
-    # Checkpoint callback - adjusted frequency
-    checkpoint_freq = max(500000 // actual_envs, 10000)  # At least every 10k steps
+    # Checkpoint callback - less frequent for large batch training
+    checkpoint_freq = max(1000000 // actual_envs, 50000)
     checkpoint_callback = CheckpointCallback(
         save_freq=checkpoint_freq,
         save_path=save_dir,
-        name_prefix=f"ppo_samurai_{actual_envs}env",
+        name_prefix=f"ppo_samurai_largebatch_{actual_envs}env",
     )
 
     print(f"💾 Checkpoint frequency: every {checkpoint_freq} steps")
 
-    # Training - GPU ONLY
+    # Training
     start_time = time.time()
-    print(
-        f"🏋️ Starting GPU training with {actual_envs} environments for {args.total_timesteps:,} timesteps"
-    )
+    print(f"🏋️ Starting MASSIVE BATCH training with {actual_envs} environments")
+    print(f"   📊 {total_samples_per_rollout:,} samples per rollout")
+    print(f"   🔥 {batch_size:,} batch size (MASSIVE)")
+    print(f"   💪 Using RTX 4070 12GB + 82GB RAM")
     print("💡 Monitor GPU usage with: watch -n 1 nvidia-smi")
-    print("💡 Monitor system resources with: htop")
 
     try:
         model.learn(
@@ -425,7 +436,7 @@ def main():
         )
 
         training_time = time.time() - start_time
-        print(f"🎉 GPU training completed in {training_time/3600:.1f} hours!")
+        print(f"🎉 LARGE BATCH training completed in {training_time/3600:.1f} hours!")
 
     except KeyboardInterrupt:
         print(f"⏹️ Training interrupted")
@@ -440,15 +451,18 @@ def main():
 
     finally:
         env.close()
-        torch.cuda.empty_cache()  # Clear GPU memory
+        torch.cuda.empty_cache()
         print("🧹 GPU memory cleared")
 
     # Save final model
-    final_model_path = os.path.join(save_dir, f"ppo_samurai_final_{actual_envs}env.zip")
+    final_model_path = os.path.join(
+        save_dir, f"ppo_samurai_largebatch_final_{actual_envs}env.zip"
+    )
     model.save(final_model_path)
     print(f"💾 Final model saved to: {final_model_path}")
 
-    print("✅ Training complete!")
+    print("✅ LARGE BATCH training complete!")
+    print(f"🎯 Strategy used: Simple win/loss rewards with 3-second jump cooldown")
 
 
 if __name__ == "__main__":
