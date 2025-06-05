@@ -40,7 +40,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # NORMALIZED DEFENSE SYSTEM for stable learning + high win rate
         self.jump_cooldown = 0
-        self.max_jump_cooldown = 10  # Very short cooldown
+        self.max_jump_cooldown = 180  # Very short cooldown
         self.jump_actions = [7, 8, 9]  # up, up-left, up-right
 
         # Comprehensive defensive actions
