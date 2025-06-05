@@ -142,12 +142,12 @@ def main():
     parser.add_argument(
         "--use-default-state", action="store_true", help="Use default game state"
     )
-    # Conservative batch size that WILL work on 12GB GPU
+    # REALISTIC batch size based on ACTUAL training memory usage
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=2048,  # SAFE batch size - definitely fits in 12GB GPU
-        help="Batch size (default: 2048 - guaranteed safe for 12GB GPU)",
+        default=2048,  # REALISTIC - based on actual CNN memory usage
+        help="Batch size (default: 2048 - realistic for CNN training)",
     )
     parser.add_argument(
         "--n-steps",
@@ -162,15 +162,10 @@ def main():
     if not check_system_resources(args.num_envs):
         sys.exit(1)
 
-    # GPU Check and Setup - MANDATORY
+    # GPU Check and Setup - ENHANCED DEBUGGING
     print("🔍 Checking GPU availability...")
     if not torch.cuda.is_available():
         print("❌ ERROR: No GPU available!")
-        print("💡 This training script requires CUDA GPU")
-        print("💡 Check: nvidia-smi")
-        print(
-            "💡 Install: pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118"
-        )
         sys.exit(1)
 
     gpu_count = torch.cuda.device_count()
@@ -180,19 +175,41 @@ def main():
 
     print(f"✅ GPU Detected: {gpu_name}")
     print(f"   GPU Memory: {gpu_memory:.1f} GB")
-    print(f"   Available GPUs: {gpu_count}")
-    print(f"   Current GPU: {current_gpu}")
+
+    # CLEAR ALL GPU MEMORY FIRST
+    torch.cuda.empty_cache()
+    torch.cuda.reset_peak_memory_stats()
+
+    # Check actual available memory
+    allocated = torch.cuda.memory_allocated() / 1e9
+    cached = torch.cuda.memory_reserved() / 1e9
+    free_memory = gpu_memory - allocated - cached
+
+    print(f"   🧹 After cleanup:")
+    print(f"      Allocated: {allocated:.2f} GB")
+    print(f"      Cached: {cached:.2f} GB")
+    print(f"      Free: {free_memory:.2f} GB")
+
+    if free_memory < 10.0:
+        print("⚠️ Warning: Less than 10GB free - something else using VRAM?")
+        print("💡 Try: sudo fuser -v /dev/nvidia*")
+        print("💡 Or restart to clear VRAM")
 
     device = "cuda"
 
-    # Set CUDA optimizations + MEMORY CONSERVATION
+    # Set CUDA optimizations + AGGRESSIVE MEMORY MANAGEMENT
     torch.backends.cudnn.benchmark = True
-    torch.backends.cudnn.deterministic = False  # For maximum performance
+    torch.backends.cudnn.deterministic = False
 
-    # Add memory optimization environment variables
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    # AGGRESSIVE memory optimization
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = (
+        "max_split_size_mb:128,expandable_segments:True"
+    )
 
-    print("✅ CUDA optimizations + memory conservation enabled")
+    # Clear memory before starting
+    torch.cuda.empty_cache()
+
+    print("✅ CUDA optimizations + aggressive memory management enabled")
 
     game = "SamuraiShodown-Genesis"
 
@@ -263,13 +280,15 @@ def main():
     # Calculate buffer memory usage
     buffer_memory_gb = (n_steps * actual_envs * obs_size_mb) / 1024
 
-    print(f"📈 ULTRA SAFE: Guaranteed to work on {actual_envs} environments:")
-    print(f"   Batch size: {batch_size:,} (ULTRA SAFE for any 12GB GPU)")
+    print(
+        f"📈 REALISTIC: Based on CNN memory requirements for {actual_envs} environments:"
+    )
+    print(f"   Batch size: {batch_size:,} (REALISTIC for CNN training)")
     print(f"   N-steps: {n_steps:,} (LARGE for 82GB RAM)")
     print(f"   Total samples per rollout: {total_samples_per_rollout:,}")
     print(f"   Buffer memory: {buffer_memory_gb:.2f} GB")
     print(f"   Minibatches per rollout: {total_samples_per_rollout // batch_size}")
-    print(f"   🛡️ Strategy: Guaranteed stability over maximum performance")
+    print(f"   💡 Strategy: Account for CNN forward pass memory")
 
     # Memory safety check - RELAXED FOR HIGH-END HARDWARE
     if buffer_memory_gb > 20:  # Can handle much larger buffers with 82GB RAM
@@ -377,7 +396,13 @@ def main():
 
         print(f"✅ Model loaded and updated for large batch training")
     else:
-        print(f"🧠 Creating new PPO model for CONSERVATIVE BATCH training (12GB GPU)")
+        print(f"🧠 Creating PPO with REALISTIC memory expectations")
+
+        # Check memory before creating model
+        torch.cuda.empty_cache()
+        mem_before = torch.cuda.memory_allocated() / 1e9
+        print(f"   Memory before model creation: {mem_before:.2f} GB")
+
         lr_schedule = linear_schedule(args.learning_rate, args.learning_rate * 0.1)
 
         model = PPO(
@@ -387,22 +412,46 @@ def main():
             verbose=1,
             n_steps=n_steps,
             batch_size=batch_size,
-            n_epochs=4,  # Reasonable epochs for small batches
-            gamma=0.99,  # Standard gamma
+            n_epochs=4,
+            gamma=0.99,
             learning_rate=lr_schedule,
             clip_range=linear_schedule(0.2, 0.05),
-            ent_coef=0.01,  # Standard entropy
+            ent_coef=0.01,
             vf_coef=0.5,
             max_grad_norm=0.5,
             gae_lambda=0.95,
             tensorboard_log="logs_samurai",
             policy_kwargs=dict(
                 normalize_images=False,
-                optimizer_class=torch.optim.Adam,  # Standard Adam for smaller batches
+                optimizer_class=torch.optim.Adam,
                 optimizer_kwargs=dict(eps=1e-5),
             ),
         )
-        print(f"✅ PPO model created for CONSERVATIVE BATCH training")
+
+        # Check memory after creating model
+        mem_after = torch.cuda.memory_allocated() / 1e9
+        model_memory = mem_after - mem_before
+        print(f"   Memory after model creation: {mem_after:.2f} GB")
+        print(f"   Model uses: {model_memory:.2f} GB")
+
+        # REALISTIC estimate based on CNN forward pass
+        cnn_batch_memory = (
+            batch_size * obs_size_mb * 4
+        ) / 1024  # 4x multiplier for CNN layers
+        total_estimated = mem_after + cnn_batch_memory + 1.0  # 1GB safety buffer
+
+        print(f"   🎯 REALISTIC training estimate:")
+        print(f"      CNN batch processing: {cnn_batch_memory:.2f} GB")
+        print(f"      Total estimated: {total_estimated:.2f} GB")
+
+        if total_estimated > 10.5:
+            print(f"   ⚠️ WARNING: May still be too large!")
+            safe_batch = int((9.0 - mem_after - 1.0) * 1024 / (obs_size_mb * 4))
+            print(f"   💡 Try batch size: {safe_batch}")
+        else:
+            print(f"   ✅ Should fit in 12GB GPU")
+
+        print(f"✅ PPO model created with REALISTIC expectations")
 
     # Model device verification
     print(f"🔍 Model device verification:")
