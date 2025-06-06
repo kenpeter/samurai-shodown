@@ -40,7 +40,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # MINIMAL action filtering - prevent excessive jumping
         self.jump_cooldown = 0
-        self.max_jump_cooldown = 300  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
+        self.max_jump_cooldown = 180  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
         self.jump_actions = [6, 7, 8]  # up, up-left, up-right
 
         # Environment tracking
@@ -82,7 +82,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"⚡ {self.env_id} SIMPLE Wrapper - Win/Loss Only")
         print(f"   🎯 Rewards: +1 Win, -1 Loss, 0 everything else")
         print(f"   📏 Episode length: {max_episode_steps} steps (for large batches)")
-        print(f"   🚫 Jump prevention: 3 seconds cooldown (180 frames)")
+        print(f"   🚫 Jump prevention: 5 seconds cooldown (300 frames)")
         print(f"   🚀 Optimized for fewer envs, larger batch sizes")
 
     def _process_frame(self, rgb_frame):
@@ -260,15 +260,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError):
             action_int = 0
 
-        # ANTI-SPAM jump prevention - 3 seconds cooldown
+        # ANTI-SPAM jump prevention - 5 seconds cooldown
         if self.jump_cooldown > 0:
             self.jump_cooldown -= 1
 
-        # Prevent excessive jumping with 3-second cooldown
+        # Prevent excessive jumping with 5-second cooldown
         if action_int in self.jump_actions and self.jump_cooldown > 0:
             action = 0  # Convert to neutral - no jumping allowed
         elif action_int in self.jump_actions:
-            self.jump_cooldown = self.max_jump_cooldown  # Start 3-second cooldown
+            self.jump_cooldown = self.max_jump_cooldown  # Start 5-second cooldown
 
         observation, reward, done, truncated, info = self.env.step(action)
 
