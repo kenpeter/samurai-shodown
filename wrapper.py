@@ -40,7 +40,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # MINIMAL action filtering - prevent excessive jumping
         self.jump_cooldown = 0
-        self.max_jump_cooldown = 180  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
+        self.max_jump_cooldown = 300  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
         self.jump_actions = [6, 7, 8]  # up, up-left, up-right
 
         # Environment tracking
