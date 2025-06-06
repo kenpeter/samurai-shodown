@@ -14,3 +14,7 @@ python train.py --render --total-timesteps 10000000 --num-envs 12
 
 
 python train.py --resume trained_models_samurai/ppo_samurai_4env_30000000_steps.zip
+
+
+
+python train.py --batch-size 8192 --n-steps 12288 --total-timesteps 10000000 --learning-rate 4e-3 --render
