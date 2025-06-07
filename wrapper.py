@@ -1,4 +1,4 @@
-import collections
+from collections import deque
 import gymnasium as gym
 import numpy as np
 import time
@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Simple wrapper - Custom reward formulas for win/loss/damage"""
+    """Custom wrapper with exponential win/loss rewards and jump prevention"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -25,7 +25,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         reset_round=True,
         rendering=False,
         max_episode_steps=10000,
-        reward_coeff=3.0,
+        reward_coeff=1.0,
     ):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
         self.env = env
@@ -33,7 +33,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Frame processing parameters
         self.resize_scale = 0.75
         self.num_frames = 9
-        self.frame_stack = collections.deque(maxlen=self.num_frames)
+        self.frame_stack = deque(maxlen=self.num_frames)
 
         # Health tracking
         self.full_hp = 128
@@ -47,11 +47,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.max_episode_steps = max_episode_steps
         self.episode_steps = 0
         self.reset_round = reset_round
-
-        # MINIMAL action filtering - prevent excessive jumping
-        self.jump_cooldown = 0
-        self.max_jump_cooldown = 180  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
-        self.jump_actions = [6, 7, 8]  # up, up-left, up-right
 
         # Environment tracking
         import random
@@ -92,7 +87,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"⚡ {self.env_id} CUSTOM Wrapper - Custom Reward Formulas")
         print(f"   🎯 Rewards: Custom math formulas for win/loss/damage")
         print(f"   📏 Episode length: {max_episode_steps} steps (for large batches)")
-        print(f"   🚫 Jump prevention: 5 seconds cooldown (300 frames)")
+        print(f"   🚫 Jump prevention: UP direction blocked")
         print(f"   🚀 Optimized for fewer envs, larger batch sizes")
         print(f"   💰 Reward coefficient: {reward_coeff}")
 
@@ -260,7 +255,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
-        self.jump_cooldown = 0
 
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
@@ -274,8 +268,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """MINIMAL action filtering - mostly let agent do what it wants"""
-        # Convert action to int
+        """Action filtering and custom rewards"""
+        # Convert action to int for processing
         try:
             if hasattr(action, "shape") and action.shape == ():
                 action_int = int(action)
@@ -288,15 +282,28 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError):
             action_int = 0
 
-        # ANTI-SPAM jump prevention - 5 seconds cooldown
-        if self.jump_cooldown > 0:
-            self.jump_cooldown -= 1
+        # Prevent jumping - stable-retro uses MultiBinary action space
+        # Button order: ["B", "Y", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT", "A", "X", "L", "R"]
+        # For Neo Geo: ["B", "NULL", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT", "A", "C", "D", "E"]
+        # UP is at index 4, so we need to prevent any action array with action[4] = 1
 
-        # Prevent excessive jumping with 5-second cooldown
-        if action_int in self.jump_actions and self.jump_cooldown > 0:
-            action = 0  # Convert to neutral - no jumping allowed
-        elif action_int in self.jump_actions:
-            self.jump_cooldown = self.max_jump_cooldown  # Start 5-second cooldown
+        if hasattr(self.env.action_space, "n") and self.env.action_space.n > 8:
+            # This is a MultiBinary action space - convert action to array
+            if hasattr(action, "__len__") and len(action) > 4:
+                # Direct array input
+                if len(action) > 4 and action[4] == 1:
+                    action[4] = 0  # Block UP direction
+            else:
+                # Single integer input - need to convert to MultiBinary array
+                # Just convert jump action to neutral (all zeros)
+                if (
+                    action_int == 4 or action_int > 10
+                ):  # UP or complex actions often involving UP
+                    action = 0  # Convert to neutral action
+        else:
+            # Simple discrete action space - block suspected jump actions
+            if action_int in [1, 4, 7, 8, 9]:  # Various possible UP actions
+                action = 0
 
         observation, reward, done, truncated, info = self.env.step(action)
 
