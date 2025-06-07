@@ -38,11 +38,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.episode_steps = 0
         self.reset_round = reset_round
 
-        # MINIMAL action filtering - prevent excessive jumping
-        self.jump_cooldown = 0
-        self.max_jump_cooldown = 180  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
-        self.jump_actions = [6, 7, 8]  # up, up-left, up-right
-
         # Environment tracking
         import random
 
@@ -82,7 +77,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"⚡ {self.env_id} SIMPLE Wrapper - Win/Loss Only")
         print(f"   🎯 Rewards: +1 Win, -1 Loss, 0 everything else")
         print(f"   📏 Episode length: {max_episode_steps} steps (for large batches)")
-        print(f"   🚫 Jump prevention: 5 seconds cooldown (300 frames)")
+        print(f"   🚀 No action filtering - agent has full control")
         print(f"   🚀 Optimized for fewer envs, larger batch sizes")
 
     def _process_frame(self, rgb_frame):
@@ -232,7 +227,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
-        self.jump_cooldown = 0
 
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
@@ -246,30 +240,21 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """MINIMAL action filtering - mostly let agent do what it wants"""
-        # Convert action to int
+        """No action filtering - let agent do whatever it wants"""
+        # Convert action to the format expected by Retro environment
         try:
             if hasattr(action, "shape") and action.shape == ():
-                action_int = int(action)
+                action_to_use = int(action)
             elif hasattr(action, "__len__") and len(action) == 1:
-                action_int = int(action[0])
+                action_to_use = int(action[0])
             elif hasattr(action, "item"):
-                action_int = action.item()
+                action_to_use = action.item()
             else:
-                action_int = int(action)
+                action_to_use = int(action)
         except (ValueError, IndexError):
-            action_int = 0
+            action_to_use = 0
 
-        # ANTI-SPAM jump prevention - 5 seconds cooldown
-        if self.jump_cooldown > 0:
-            self.jump_cooldown -= 1
-
-        # Prevent excessive jumping with 5-second cooldown
-        if action_int in self.jump_actions and self.jump_cooldown > 0:
-            action = 0  # Convert to neutral - no jumping allowed
-        elif action_int in self.jump_actions:
-            self.jump_cooldown = self.max_jump_cooldown  # Start 5-second cooldown
-
+        # Pass action directly to environment (Retro expects the original action format)
         observation, reward, done, truncated, info = self.env.step(action)
 
         curr_player_health, curr_opponent_health = self._extract_health(info)

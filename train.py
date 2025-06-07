@@ -281,7 +281,6 @@ def main():
     print(f"   💻 Device: CPU with 82GB RAM")
     print(f"   🎯 Strategy: Large batches without GPU memory limits")
     print(f"   🔥 Batch size: {batch_size:,} samples (LARGE)")
-    print(f"   🎮 Rewards: Win/Loss only, 3-sec jump cooldown")
     print(f"   Game: {game}")
     print(f"   Total timesteps: {args.total_timesteps:,}")
     print(f"   Environments: {actual_envs}")
