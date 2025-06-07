@@ -385,7 +385,7 @@ def main():
         break
 
     # Checkpoint callback - less frequent for massive batch training
-    checkpoint_freq = max(2000000 // actual_envs, 100000)
+    checkpoint_freq = 300000
     checkpoint_callback = CheckpointCallback(
         save_freq=checkpoint_freq,
         save_path=save_dir,
