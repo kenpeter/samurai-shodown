@@ -140,7 +140,7 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8192,  # LARGE but safe batch size
+        default=8192,  # super large batch size
         help="Batch size (default: 8192 - large and safe)",
     )
     parser.add_argument(

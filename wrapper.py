@@ -6,9 +6,11 @@ from datetime import datetime
 import math
 
 
+# wrapper
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
     """Simple wrapper - Win/Loss rewards only, optimized for large batch sizes"""
 
+    # total win, lose, round, stat, log, session start
     # Global tracking across all environments
     _global_stats = {
         "total_wins": 0,
@@ -19,7 +21,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         "session_start": time.time(),
     }
 
-    def __init__(self, env, reset_round=True, rendering=False, max_episode_steps=10000):
+    # init with super wrapper
+    def __init__(
+        self,
+        env,
+        reset_round=True,
+        rendering=False,
+        max_episode_steps=10000,
+        reward_coeff=3.0,
+    ):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
         self.env = env
 
@@ -28,15 +38,22 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.num_frames = 9
         self.frame_stack = collections.deque(maxlen=self.num_frames)
 
-        # Health tracking
-        self.full_hp = 128
-        self.prev_player_health = self.full_hp
-        self.prev_opponent_health = self.full_hp
+        # NEW: Reward parameters
+        self.reward_coeff = reward_coeff  # Reward coefficient for wins/damage
+        self.total_timesteps = 0  # Track total timesteps
 
-        # Episode management - LONGER episodes for larger batches
+        # MISSING: Rendering parameter
+        self.rendering = rendering  # Store rendering flag
+
+        # Episode management
         self.max_episode_steps = max_episode_steps
         self.episode_steps = 0
         self.reset_round = reset_round
+
+        # Health tracking
+        self.full_hp = 128
+        self.prev_player_health = self.full_hp
+        self.prev_opponent_health = self.full_hp  # Fixed typo: oppont -> opponent
 
         # Environment tracking
         import random
@@ -56,17 +73,19 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Logging configuration
         self.log_interval = 120  # Log every 2 minutes
 
-        # Get frame dimensions and calculate target size
+        # actual obs
         dummy_obs = self.env.reset()
         if isinstance(dummy_obs, tuple):
             actual_obs = dummy_obs[0]
         else:
             actual_obs = dummy_obs
 
+        # 75% resize
         original_height, original_width = actual_obs.shape[:2]
         self.target_height = int(original_height * self.resize_scale)
         self.target_width = int(original_width * self.resize_scale)
 
+        # obs
         self.observation_space = gym.spaces.Box(
             low=0,
             high=255,
@@ -80,6 +99,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"   🚀 No action filtering - agent has full control")
         print(f"   🚀 Optimized for fewer envs, larger batch sizes")
 
+    # convert to rgb
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
         if len(rgb_frame.shape) == 3 and rgb_frame.shape[2] == 3:
@@ -98,6 +118,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         else:
             return gray
 
+    # stack ovs
     def _stack_observation(self):
         """Stack frames in channels-first format"""
         frames_list = list(self.frame_stack)
@@ -114,12 +135,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         stacked = np.stack(frames_list, axis=0)
         return stacked
 
+    # get health
     def _extract_health(self, info):
         """Extract health from info"""
         player_health = info.get("health", self.full_hp)
         opponent_health = info.get("enemy_health", self.full_hp)
         return player_health, opponent_health
 
+    # just log
     def _log_periodic_stats(self):
         """Log simple win/loss stats"""
         current_time = time.time()
@@ -150,6 +173,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             print()
             global_stats["last_log_time"] = current_time
 
+    # super simple reward
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
         """SUPER SIMPLE - Only +1 win, -1 loss, 0 everything else"""
         reward = 0.0
@@ -215,6 +239,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Everything else = 0 reward
         return 0.0, done
 
+    # reset
     def reset(self, **kwargs):
         """Reset environment"""
         result = self.env.reset(**kwargs)
@@ -240,41 +265,96 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """No action filtering - let agent do whatever it wants"""
-        # Convert action to the format expected by Retro environment
-        try:
-            if hasattr(action, "shape") and action.shape == ():
-                action_to_use = int(action)
-            elif hasattr(action, "__len__") and len(action) == 1:
-                action_to_use = int(action[0])
-            elif hasattr(action, "item"):
-                action_to_use = action.item()
-            else:
-                action_to_use = int(action)
-        except (ValueError, IndexError):
-            action_to_use = 0
+        """Custom step function with detailed reward system"""
+        custom_done = False
 
-        # Pass action directly to environment (Retro expects the original action format)
+        # Single step with action (pass action directly, let retro handle conversion)
         observation, reward, done, truncated, info = self.env.step(action)
 
-        curr_player_health, curr_opponent_health = self._extract_health(info)
-        custom_reward, custom_done = self._calculate_reward(
-            curr_player_health, curr_opponent_health
-        )
-
-        if custom_done:
-            done = custom_done
-
+        # Process and add frame (no downsampling)
         processed_frame = self._process_frame(observation)
         self.frame_stack.append(processed_frame)
-        stacked_obs = self._stack_observation()
 
+        # Render if needed
+        if self.rendering:
+            self.env.render()
+            time.sleep(0.01)
+
+        # Extract health from info
+        curr_player_health = info.get("agent_hp", self.full_hp)
+        curr_opponent_health = info.get("enemy_hp", self.full_hp)
+
+        # Update total timesteps
+        if not hasattr(self, "total_timesteps"):
+            self.total_timesteps = 0
+        self.total_timesteps += 1
+
+        # Calculate custom reward based on game state
+        if curr_player_health < 0:
+            # Player loses - penalty based on opponent's remaining health
+            custom_reward = -math.pow(
+                self.full_hp, (curr_opponent_health + 1) / (self.full_hp + 1)
+            )
+            custom_done = True
+
+            # Update stats
+            self.losses += 1
+            self.total_rounds += 1
+            win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
+            print(
+                f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+            )
+
+        elif curr_opponent_health < 0:
+            # Player wins - reward based on player's remaining health
+            reward_coeff = getattr(
+                self, "reward_coeff", 3.0
+            )  # Default reward coefficient
+            custom_reward = (
+                math.pow(self.full_hp, (curr_player_health + 1) / (self.full_hp + 1))
+                * reward_coeff
+            )
+            custom_done = True
+
+            # Update stats
+            self.wins += 1
+            self.total_rounds += 1
+            win_rate = self.wins / self.total_rounds
+            print(f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})")
+
+        else:
+            # Fighting continues - reward based on damage dealt vs received
+            reward_coeff = getattr(self, "reward_coeff", 3.0)
+            damage_dealt = self.prev_opponent_health - curr_opponent_health
+            damage_received = self.prev_player_health - curr_player_health
+            custom_reward = reward_coeff * damage_dealt - damage_received
+
+            # Update health tracking
+            self.prev_player_health = curr_player_health
+            self.prev_opponent_health = curr_opponent_health
+            custom_done = False
+
+        # Override done flag if reset_round is False
+        if not self.reset_round:
+            custom_done = False
+
+        # Check episode step limit
         self.episode_steps += 1
-
         if self.episode_steps >= self.max_episode_steps:
             truncated = True
 
-        return stacked_obs, custom_reward, done, truncated, info
+        # Apply custom done flag
+        if custom_done:
+            done = custom_done
+
+        # Periodic logging
+        self._log_periodic_stats()
+
+        # Return with reward normalization (max reward ~1054, normalized to ~1.0)
+        stacked_obs = self._stack_observation()
+        normalized_reward = 0.001 * custom_reward
+
+        return stacked_obs, normalized_reward, done, truncated, info
 
     @classmethod
     def print_final_stats(cls):
