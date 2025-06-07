@@ -102,7 +102,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_samurai/ppo_samurai_largebatch_2env_10000000_steps.zip",
+        default="trained_models_samurai_cpu/ppo_samurai_cpu_massive_2env_600000_steps.zip",
         help="Path to the trained model",
     )
     parser.add_argument(

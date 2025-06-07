@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Simple wrapper - Win/Loss rewards only, optimized for large batch sizes"""
+    """Simple wrapper - Custom reward formulas for win/loss/damage"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -19,7 +19,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         "session_start": time.time(),
     }
 
-    def __init__(self, env, reset_round=True, rendering=False, max_episode_steps=10000):
+    def __init__(
+        self,
+        env,
+        reset_round=True,
+        rendering=False,
+        max_episode_steps=10000,
+        reward_coeff=3.0,
+    ):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
         self.env = env
 
@@ -32,6 +39,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.full_hp = 128
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
+
+        # Reward coefficient
+        self.reward_coeff = reward_coeff
 
         # Episode management - LONGER episodes for larger batches
         self.max_episode_steps = max_episode_steps
@@ -79,11 +89,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"⚡ {self.env_id} SIMPLE Wrapper - Win/Loss Only")
-        print(f"   🎯 Rewards: +1 Win, -1 Loss, 0 everything else")
+        print(f"⚡ {self.env_id} CUSTOM Wrapper - Custom Reward Formulas")
+        print(f"   🎯 Rewards: Custom math formulas for win/loss/damage")
         print(f"   📏 Episode length: {max_episode_steps} steps (for large batches)")
         print(f"   🚫 Jump prevention: 5 seconds cooldown (300 frames)")
         print(f"   🚀 Optimized for fewer envs, larger batch sizes")
+        print(f"   💰 Reward coefficient: {reward_coeff}")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -135,7 +146,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         if time_since_last_log >= self.log_interval:
             global_stats = SamuraiShowdownCustomWrapper._global_stats
 
-            print(f"\n📊 SIMPLE WIN/LOSS STATS:")
+            print(f"\n📊 CUSTOM REWARD STATS:")
 
             for env_id, stats in global_stats["env_stats"].items():
                 if stats["total_rounds"] > 0:
@@ -156,7 +167,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """SUPER SIMPLE - Only +1 win, -1 loss, 0 everything else"""
+        """Custom reward formulas - exponential scaling based on health remaining"""
         reward = 0.0
         done = False
 
@@ -166,7 +177,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # WIN = +1
+                # WIN - Custom formula
+                custom_reward = (
+                    math.pow(
+                        self.full_hp, (curr_player_health + 1) / (self.full_hp + 1)
+                    )
+                    * self.reward_coeff
+                )
+
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_wins"] += 1
@@ -178,17 +196,21 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 ] = self.total_rounds
 
                 print(
-                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%}) Reward: {custom_reward:.3f}"
                 )
 
-                reward = 1.0  # Simple +1 for win
+                reward = custom_reward
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
                 return reward, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                # LOSS = -1
+                # LOSS - Custom formula
+                custom_reward = -math.pow(
+                    self.full_hp, (curr_opponent_health + 1) / (self.full_hp + 1)
+                )
+
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
@@ -200,10 +222,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 ] = self.total_rounds
 
                 print(
-                    f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                    f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%}) Reward: {custom_reward:.3f}"
                 )
 
-                reward = -1.0  # Simple -1 for loss
+                reward = custom_reward
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
@@ -214,11 +236,17 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
             self._log_periodic_stats()
 
+        else:
+            # In-play reward - damage differential
+            custom_reward = self.reward_coeff * (
+                self.prev_opponent_health - curr_opponent_health
+            ) - (self.prev_player_health - curr_player_health)
+            reward = custom_reward
+
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
 
-        # Everything else = 0 reward
-        return 0.0, done
+        return reward, done
 
     def reset(self, **kwargs):
         """Reset environment"""
