@@ -491,14 +491,20 @@ def collect_trajectories(env, num_episodes=200):
     print(f"🎮 Collecting {num_episodes} trajectories...")
     trajectories = []
 
+    # loop ep
     for episode in range(num_episodes):
+        # state, action, reward
         trajectory = {"states": [], "actions": [], "rewards": []}
+        # reset
         obs, _ = env.reset()
+        # copy obs into states
         trajectory["states"].append(obs.copy())
 
+        # done and truncated
         done = False
         truncated = False
 
+        # !done and !truncated
         while not done and not truncated:
             action = env.action_space.sample()
             obs, reward, done, truncated, _ = env.step(action)
