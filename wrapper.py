@@ -99,26 +99,29 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"   🚀 No action filtering - agent has full control")
         print(f"   🚀 Optimized for fewer envs, larger batch sizes")
 
-    # convert to rgb
     def _process_frame(self, rgb_frame):
+        # conert to gray scale
         """Convert RGB frame to grayscale and resize"""
         if len(rgb_frame.shape) == 3 and rgb_frame.shape[2] == 3:
             gray = np.dot(rgb_frame, [0.299, 0.587, 0.114])
             gray = gray.astype(np.uint8)
         else:
+            # default to rgb frame
             gray = rgb_frame
 
+        # resize
         if gray.shape[:2] != (self.target_height, self.target_width):
             h_ratio = gray.shape[0] / self.target_height
             w_ratio = gray.shape[1] / self.target_width
             h_indices = (np.arange(self.target_height) * h_ratio).astype(int)
             w_indices = (np.arange(self.target_width) * w_ratio).astype(int)
+            # gray then resize
             resized = gray[np.ix_(h_indices, w_indices)]
             return resized
         else:
             return gray
 
-    # stack ovs
+    # stack obs
     def _stack_observation(self):
         """Stack frames in channels-first format"""
         frames_list = list(self.frame_stack)
@@ -281,7 +284,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             time.sleep(0.01)
 
         # Extract health from info
-        curr_player_health = info.get("agent_hp", self.full_hp)
+        curr_player_health = info.get("health", self.full_hp)
         curr_opponent_health = info.get("enemy_hp", self.full_hp)
 
         # Update total timesteps
@@ -312,13 +315,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             )  # Default reward coefficient
             custom_reward = (
                 math.pow(self.full_hp, (curr_player_health + 1) / (self.full_hp + 1))
-                * reward_coeff
-            )
-            custom_done = True
-
-            # Update stats
-            self.wins += 1
-            self.total_rounds += 1
+            ) * reward_coeff  # convert to gray scale
             win_rate = self.wins / self.total_rounds
             print(f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})")
 
