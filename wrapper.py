@@ -285,7 +285,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # Extract health from info
         curr_player_health = info.get("health", self.full_hp)
-        curr_opponent_health = info.get("enemy_hp", self.full_hp)
+        curr_opponent_health = info.get("enemy_health", self.full_hp)
 
         # Update total timesteps
         if not hasattr(self, "total_timesteps"):
