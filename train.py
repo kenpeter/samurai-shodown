@@ -140,7 +140,7 @@ def main():
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=8192,  # super large batch size
+        default=8192,  # LARGE but safe batch size
         help="Batch size (default: 8192 - large and safe)",
     )
     parser.add_argument(
@@ -281,6 +281,7 @@ def main():
     print(f"   💻 Device: CPU with 82GB RAM")
     print(f"   🎯 Strategy: Large batches without GPU memory limits")
     print(f"   🔥 Batch size: {batch_size:,} samples (LARGE)")
+    print(f"   🎮 Rewards: Win/Loss only, 3-sec jump cooldown")
     print(f"   Game: {game}")
     print(f"   Total timesteps: {args.total_timesteps:,}")
     print(f"   Environments: {actual_envs}")
@@ -384,7 +385,7 @@ def main():
         break
 
     # Checkpoint callback - less frequent for massive batch training
-    checkpoint_freq = max(300000 // actual_envs, 50000)
+    checkpoint_freq = 300000
     checkpoint_callback = CheckpointCallback(
         save_freq=checkpoint_freq,
         save_path=save_dir,

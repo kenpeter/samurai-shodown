@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Fixed wrapper - Clear win/loss tracking and rewards"""
+    """Simple wrapper - Win/Loss rewards only, optimized for large batch sizes"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -19,14 +19,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         "session_start": time.time(),
     }
 
-    def __init__(
-        self,
-        env,
-        reset_round=True,
-        rendering=False,
-        max_episode_steps=10000,
-        reward_coeff=3.0,
-    ):
+    def __init__(self, env, reset_round=True, rendering=False, max_episode_steps=10000):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
         self.env = env
 
@@ -35,23 +28,20 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.num_frames = 9
         self.frame_stack = collections.deque(maxlen=self.num_frames)
 
-        # Reward parameters
-        self.reward_coeff = reward_coeff
-        self.total_timesteps = 0
+        # Health tracking
+        self.full_hp = 128
+        self.prev_player_health = self.full_hp
+        self.prev_opponent_health = self.full_hp
 
-        # Rendering parameter
-        self.rendering = rendering
-
-        # Episode management
+        # Episode management - LONGER episodes for larger batches
         self.max_episode_steps = max_episode_steps
         self.episode_steps = 0
         self.reset_round = reset_round
 
-        # Health tracking - CRITICAL FIX
-        self.full_hp = 128
-        self.prev_player_health = self.full_hp
-        self.prev_opponent_health = self.full_hp
-        self.round_ended = False  # Track if round has ended
+        # MINIMAL action filtering - prevent excessive jumping
+        self.jump_cooldown = 0
+        self.max_jump_cooldown = 180  # 3 seconds at 60 FPS (3 * 60 = 180 frames)
+        self.jump_actions = [6, 7, 8]  # up, up-left, up-right
 
         # Environment tracking
         import random
@@ -61,7 +51,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.losses = 0
         self.total_rounds = 0
 
-        # Initialize global tracking
+        # Initialize global tracking for this environment
         SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id] = {
             "wins": 0,
             "losses": 0,
@@ -69,9 +59,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         }
 
         # Logging configuration
-        self.log_interval = 120
+        self.log_interval = 120  # Log every 2 minutes
 
-        # Get observation space dimensions
+        # Get frame dimensions and calculate target size
         dummy_obs = self.env.reset()
         if isinstance(dummy_obs, tuple):
             actual_obs = dummy_obs[0]
@@ -89,10 +79,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"🔧 {self.env_id} FIXED Wrapper - Clear Win/Loss Tracking")
-        print(f"   🎯 Rewards: Progressive based on health + win/loss bonuses")
-        print(f"   📏 Episode length: {max_episode_steps} steps")
-        print(f"   🏥 Health tracking: Player vs Opponent")
+        print(f"⚡ {self.env_id} SIMPLE Wrapper - Win/Loss Only")
+        print(f"   🎯 Rewards: +1 Win, -1 Loss, 0 everything else")
+        print(f"   📏 Episode length: {max_episode_steps} steps (for large batches)")
+        print(f"   🚫 Jump prevention: 5 seconds cooldown (300 frames)")
+        print(f"   🚀 Optimized for fewer envs, larger batch sizes")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -128,8 +119,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         stacked = np.stack(frames_list, axis=0)
         return stacked
 
+    def _extract_health(self, info):
+        """Extract health from info"""
+        player_health = info.get("health", self.full_hp)
+        opponent_health = info.get("enemy_health", self.full_hp)
+        return player_health, opponent_health
+
     def _log_periodic_stats(self):
-        """Log win/loss stats periodically"""
+        """Log simple win/loss stats"""
         current_time = time.time()
         time_since_last_log = (
             current_time - SamuraiShowdownCustomWrapper._global_stats["last_log_time"]
@@ -138,10 +135,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         if time_since_last_log >= self.log_interval:
             global_stats = SamuraiShowdownCustomWrapper._global_stats
 
-            print(f"\n📊 WIN/LOSS STATS UPDATE:")
-            print(
-                f"   🌍 Global: {global_stats['total_wins']}W/{global_stats['total_losses']}L"
-            )
+            print(f"\n📊 SIMPLE WIN/LOSS STATS:")
 
             for env_id, stats in global_stats["env_stats"].items():
                 if stats["total_rounds"] > 0:
@@ -153,96 +147,78 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     else:
                         emoji = "📈"
                     print(
-                        f"   {emoji} {env_id}: {stats['wins']}W/{stats['losses']}L ({win_rate:.1f}%) - {stats['total_rounds']} rounds"
+                        f"   {emoji} {env_id}: {stats['wins']}W/{stats['losses']}L ({win_rate:.1f}%)"
                     )
                 else:
-                    print(f"   ⏳ {env_id}: No completed rounds yet")
+                    print(f"   ⏳ {env_id}: 0W/0L (0.0%)")
 
             print()
             global_stats["last_log_time"] = current_time
 
-    def _calculate_reward_and_done(self, curr_player_health, curr_opponent_health):
-        """FIXED: Calculate reward using your original reward logic"""
+    def _calculate_reward(self, curr_player_health, curr_opponent_health):
+        """SUPER SIMPLE - Only +1 win, -1 loss, 0 everything else"""
+        reward = 0.0
         done = False
 
-        # Check for round end conditions
-        player_dead = curr_player_health < 0
-        opponent_dead = curr_opponent_health < 0
+        # Check for round end
+        if curr_player_health <= 0 or curr_opponent_health <= 0:
+            self.total_rounds += 1
+            SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
-        if player_dead:
-            if not self.round_ended:  # Only process once per round
-                self.round_ended = True
-                self.total_rounds += 1
-                self.losses += 1
-
-                # Update global stats
-                SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
-                SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
-                SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
-                    "total_rounds"
-                ] = self.total_rounds
-                SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
-                    "losses"
-                ] = self.losses
-
-                # Your original loss reward: penalty based on opponent's remaining health
-                custom_reward = -math.pow(
-                    self.full_hp, (curr_opponent_health + 1) / (self.full_hp + 1)
-                )
-
-                win_rate = (
-                    self.wins / self.total_rounds * 100 if self.total_rounds > 0 else 0
-                )
-                print(
-                    f"💀 {self.env_id} LOSS! Opponent: {curr_opponent_health}/{self.full_hp} | {self.wins}W/{self.losses}L ({win_rate:.1f}%)"
-                )
-
-                # End episode if reset_round is True
-                if self.reset_round:
-                    done = True
-
-                return custom_reward, done
-
-        elif opponent_dead:
-            if not self.round_ended:  # Only process once per round
-                self.round_ended = True
-                self.total_rounds += 1
+            if curr_opponent_health <= 0 and curr_player_health > 0:
+                # WIN = +1
                 self.wins += 1
-
-                # Update global stats
-                SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
+                win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_wins"] += 1
-                SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
-                    "total_rounds"
-                ] = self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
                     "wins"
                 ] = self.wins
+                SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
+                    "total_rounds"
+                ] = self.total_rounds
 
-                # Your original win reward: reward based on player's remaining health
-                custom_reward = (
-                    math.pow(
-                        self.full_hp, (curr_player_health + 1) / (self.full_hp + 1)
-                    )
-                ) * self.reward_coeff
-
-                win_rate = self.wins / self.total_rounds * 100
                 print(
-                    f"🏆 {self.env_id} WIN! Health: {curr_player_health}/{self.full_hp} | {self.wins}W/{self.losses}L ({win_rate:.1f}%)"
+                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
 
-                # End episode if reset_round is True
-                if self.reset_round:
-                    done = True
+                reward = 1.0  # Simple +1 for win
 
-                return custom_reward, done
-        else:
-            # Fighting continues - your original damage-based reward
-            damage_dealt = self.prev_opponent_health - curr_opponent_health
-            damage_received = self.prev_player_health - curr_player_health
-            custom_reward = self.reward_coeff * damage_dealt - damage_received
+                self.prev_player_health = curr_player_health
+                self.prev_opponent_health = curr_opponent_health
+                return reward, True
 
-        return custom_reward, done
+            elif curr_player_health <= 0 and curr_opponent_health > 0:
+                # LOSS = -1
+                self.losses += 1
+                win_rate = self.wins / self.total_rounds
+                SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
+                SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
+                    "losses"
+                ] = self.losses
+                SamuraiShowdownCustomWrapper._global_stats["env_stats"][self.env_id][
+                    "total_rounds"
+                ] = self.total_rounds
+
+                print(
+                    f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                )
+
+                reward = -1.0  # Simple -1 for loss
+
+                self.prev_player_health = curr_player_health
+                self.prev_opponent_health = curr_opponent_health
+                return reward, True
+
+            if self.reset_round:
+                done = True
+
+            self._log_periodic_stats()
+
+        self.prev_player_health = curr_player_health
+        self.prev_opponent_health = curr_opponent_health
+
+        # Everything else = 0 reward
+        return 0.0, done
 
     def reset(self, **kwargs):
         """Reset environment"""
@@ -253,13 +229,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             observation = result
             info = {}
 
-        # Reset health tracking
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
-        self.round_ended = False  # Reset round flag
+        self.jump_cooldown = 0
 
-        # Reset frame stack
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
         self.frame_stack.append(processed_frame.copy())
@@ -272,68 +246,52 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """FIXED step function with proper win/loss tracking"""
-        # Take action in environment
-        observation, original_reward, done, truncated, info = self.env.step(action)
+        """MINIMAL action filtering - mostly let agent do what it wants"""
+        # Convert action to int
+        try:
+            if hasattr(action, "shape") and action.shape == ():
+                action_int = int(action)
+            elif hasattr(action, "__len__") and len(action) == 1:
+                action_int = int(action[0])
+            elif hasattr(action, "item"):
+                action_int = action.item()
+            else:
+                action_int = int(action)
+        except (ValueError, IndexError):
+            action_int = 0
 
-        # Process frame
-        processed_frame = self._process_frame(observation)
-        self.frame_stack.append(processed_frame)
+        # ANTI-SPAM jump prevention - 5 seconds cooldown
+        if self.jump_cooldown > 0:
+            self.jump_cooldown -= 1
 
-        # Render if needed
-        if self.rendering:
-            self.env.render()
-            time.sleep(0.01)
+        # Prevent excessive jumping with 5-second cooldown
+        if action_int in self.jump_actions and self.jump_cooldown > 0:
+            action = 0  # Convert to neutral - no jumping allowed
+        elif action_int in self.jump_actions:
+            self.jump_cooldown = self.max_jump_cooldown  # Start 5-second cooldown
 
-        # Extract current health - CRITICAL: Handle missing health info
-        curr_player_health = info.get("health", self.prev_player_health)
-        curr_opponent_health = info.get("enemy_health", self.prev_opponent_health)
+        observation, reward, done, truncated, info = self.env.step(action)
 
-        # Ensure health values are valid
-        if curr_player_health is None:
-            curr_player_health = self.prev_player_health
-        if curr_opponent_health is None:
-            curr_opponent_health = self.prev_opponent_health
-
-        # Calculate custom reward and check for round end
-        custom_reward, custom_done = self._calculate_reward_and_done(
+        curr_player_health, curr_opponent_health = self._extract_health(info)
+        custom_reward, custom_done = self._calculate_reward(
             curr_player_health, curr_opponent_health
         )
 
-        # Update health tracking (only if round hasn't ended)
-        if not self.round_ended:
-            self.prev_player_health = curr_player_health
-            self.prev_opponent_health = curr_opponent_health
+        if custom_done:
+            done = custom_done
 
-        # Check episode step limit
+        processed_frame = self._process_frame(observation)
+        self.frame_stack.append(processed_frame)
+        stacked_obs = self._stack_observation()
+
         self.episode_steps += 1
+
         if self.episode_steps >= self.max_episode_steps:
             truncated = True
-
-        # Use custom done flag
-        if custom_done:
-            done = True
-
-        # Periodic logging
-        self._log_periodic_stats()
-
-        # Return stacked observation with custom reward
-        stacked_obs = self._stack_observation()
 
         return stacked_obs, custom_reward, done, truncated, info
 
     @classmethod
     def print_final_stats(cls):
         """Print final statistics when training ends"""
-        global_stats = cls._global_stats
-        print(f"\n🏁 FINAL TRAINING STATS:")
-        print(
-            f"   🌍 Total: {global_stats['total_wins']}W/{global_stats['total_losses']}L"
-        )
-
-        for env_id, stats in global_stats["env_stats"].items():
-            if stats["total_rounds"] > 0:
-                win_rate = stats["wins"] / stats["total_rounds"] * 100
-                print(
-                    f"   📊 {env_id}: {stats['wins']}W/{stats['losses']}L ({win_rate:.1f}%)"
-                )
+        pass
