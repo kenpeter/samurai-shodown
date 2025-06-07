@@ -25,7 +25,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         reset_round=True,
         rendering=False,
         max_episode_steps=10000,
-        reward_coeff=1.0,
+        reward_coeff=3.0,
     ):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
         self.env = env
