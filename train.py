@@ -168,82 +168,67 @@ def save_checkpoint(model, timesteps, save_dir):
     print(f"💾 Checkpoint saved at {timesteps} timesteps: {checkpoint_path}")
 
 
-def collect_trajectories_with_checkpoints_vec(
-    vec_env, total_timesteps, model, save_dir, checkpoint_interval=300000, num_envs=4
+def collect_trajectories_with_checkpoints_single(
+    env, total_timesteps, model, save_dir, checkpoint_interval=300000
 ):
-    """Collect trajectories with periodic model saving using vectorized environments"""
+    """Collect trajectories with periodic model saving using single stable environment"""
     print(
-        f"🎮 Collecting {total_timesteps} timesteps with {num_envs} parallel subprocess environments..."
+        f"🎮 Collecting {total_timesteps:,} timesteps with single stable environment..."
     )
-    print(f"💾 Checkpoints every {checkpoint_interval} steps")
+    print(f"💾 Checkpoints every {checkpoint_interval:,} steps")
 
     trajectories = []
     current_timesteps = 0
     episode_count = 0
     last_checkpoint = 0
 
-    # Initialize environments
-    obs = vec_env.reset()
-    trajectory_list = []
-
-    for i in range(num_envs):
-        trajectory_list.append(
-            {"states": [obs[i].copy()], "actions": [], "rewards": []}
-        )
-
     while current_timesteps < total_timesteps:
-        # Sample actions for all environments
-        actions = [vec_env.action_space.sample() for _ in range(num_envs)]
+        trajectory = {"states": [], "actions": [], "rewards": []}
+        obs, _ = env.reset()
+        trajectory["states"].append(obs.copy())
 
-        try:
-            obs, rewards, dones, infos = vec_env.step(actions)
+        done = False
+        truncated = False
+        step_count = 0
 
-            for env_idx in range(num_envs):
-                if current_timesteps >= total_timesteps:
-                    break
+        while (
+            not done
+            and not truncated
+            and step_count < 3000
+            and current_timesteps < total_timesteps
+        ):
+            # Simple random policy
+            action = env.action_space.sample()
 
-                trajectory = trajectory_list[env_idx]
+            try:
+                obs, reward, done, truncated, _ = env.step(action)
 
-                trajectory["actions"].append(actions[env_idx])
-                trajectory["rewards"].append(rewards[env_idx])
+                trajectory["actions"].append(action)
+                trajectory["rewards"].append(reward)
                 current_timesteps += 1
+                step_count += 1
 
-                if not dones[env_idx]:
-                    trajectory["states"].append(obs[env_idx].copy())
+                if not done and not truncated:
+                    trajectory["states"].append(obs.copy())
 
                 # Check for checkpoint save
                 if current_timesteps - last_checkpoint >= checkpoint_interval:
                     save_checkpoint(model, current_timesteps, save_dir)
                     last_checkpoint = current_timesteps
 
-                # Handle episode end
-                if dones[env_idx] or len(trajectory["actions"]) >= 3000:
-                    # Save trajectory if meaningful
-                    if len(trajectory["actions"]) > 10:
-                        trajectories.append(trajectory)
-                        episode_count += 1
+            except Exception as e:
+                print(f"⚠️ Step error in episode {episode_count}: {e}")
+                break
 
-                    # Start new trajectory (obs already reset by vec_env)
-                    trajectory_list[env_idx] = {
-                        "states": [obs[env_idx].copy()],
-                        "actions": [],
-                        "rewards": [],
-                    }
+        # Save trajectory if meaningful
+        if len(trajectory["actions"]) > 10:
+            trajectories.append(trajectory)
 
-        except Exception as e:
-            print(f"⚠️ Step error: {e}")
-            obs = vec_env.reset()
-            # Reset all trajectories
-            for env_idx in range(num_envs):
-                trajectory_list[env_idx] = {
-                    "states": [obs[env_idx].copy()],
-                    "actions": [],
-                    "rewards": [],
-                }
+        episode_count += 1
 
-        # Periodic logging
-        if current_timesteps > 0 and current_timesteps % 50000 == 0:
-            recent_rewards = [sum(t["rewards"]) for t in trajectories[-200:]]
+        # Periodic logging every 25,000 timesteps
+        if current_timesteps > 0 and current_timesteps % 25000 == 0:
+            recent_rewards = [sum(t["rewards"]) for t in trajectories[-100:]]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
             win_episodes = (
                 sum(1 for r in recent_rewards if r > 0) if recent_rewards else 0
@@ -251,23 +236,19 @@ def collect_trajectories_with_checkpoints_vec(
             win_rate = (
                 (win_episodes / len(recent_rewards) * 100) if recent_rewards else 0
             )
+
             print(
-                f"   Timesteps: {current_timesteps:,}/{total_timesteps:,} | "
-                f"Episodes: {episode_count} | "
+                f"   📊 Timesteps: {current_timesteps:,}/{total_timesteps:,} | "
+                f"Episodes: {episode_count:,} | "
                 f"Win Rate: {win_rate:.1f}% | "
                 f"Avg Reward: {avg_reward:.2f}"
             )
-
-    # Save any remaining trajectories
-    for trajectory in trajectory_list:
-        if len(trajectory["actions"]) > 10:
-            trajectories.append(trajectory)
 
     # Save final checkpoint
     save_checkpoint(model, current_timesteps, save_dir)
 
     print(
-        f"✅ Collected {len(trajectories)} valid trajectories over {current_timesteps:,} timesteps"
+        f"✅ Collected {len(trajectories):,} valid trajectories over {current_timesteps:,} timesteps"
     )
     return trajectories
 
@@ -285,8 +266,8 @@ def main():
     parser.add_argument(
         "--num-envs",
         type=int,
-        default=4,  # Use 4 parallel environments
-        help="Number of parallel environments",
+        default=1,  # Use single environment for stability
+        help="Number of parallel environments (1 for stability)",
     )
     parser.add_argument(
         "--learning-rate",
@@ -402,43 +383,41 @@ def main():
 
     print(f"💾 Save directory: {save_dir}")
 
-    # Create training environments - USE SUBPROCESS FOR RETRO COMPATIBILITY
-    print(
-        f"🏗️ Creating {args.num_envs} parallel training environments (subprocess-based)..."
+    # Create training environment - SINGLE STABLE ENVIRONMENT
+    print(f"🏗️ Creating stable single training environment...")
+
+    # Create single environment for stability
+    env = retro.make(
+        game=game,
+        state=state,
+        use_restricted_actions=retro.Actions.FILTERED,
+        obs_type=retro.Observations.IMAGE,
+        render_mode="human" if args.render else None,
     )
+    env = SamuraiShowdownCustomWrapper(
+        env,
+        reset_round=True,
+        rendering=args.render,
+        max_episode_steps=15000,
+    )
+    env = Monitor(env)
 
-    # Create subprocess-based environments for retro compatibility
-    env_fns = []
-    for i in range(args.num_envs):
-        env_fn = make_env_for_subprocess(
-            game=game,
-            state=state,
-            rendering=args.render,  # All environments have same render mode
-            seed=i,
-            env_id=i,
-        )
-        env_fns.append(env_fn)
-
-    # Create vectorized environment
-    vec_env = SubprocVecEnv(env_fns)
-
-    print(f"✅ {args.num_envs} subprocess environments created successfully")
-    if args.render:
-        print(f"⚠️  Note: All {args.num_envs} environments will render (may be slow)")
-    else:
-        print(f"🏃 Fast mode: No rendering for maximum speed")
+    print(f"✅ Single environment created successfully")
 
     # Test environment
-    print("🧪 Testing vectorized environments...")
+    print("🧪 Testing environment...")
     try:
-        obs = vec_env.reset()
+        obs, info = env.reset()
         print(f"✅ Reset successful - obs shape: {obs.shape}")
 
         # Test a few steps
         for i in range(5):
-            actions = [vec_env.action_space.sample() for _ in range(args.num_envs)]
-            obs, rewards, dones, infos = vec_env.step(actions)
-            print(f"   Step {i+1}: rewards={rewards}, dones={dones}")
+            action = env.action_space.sample()
+            obs, reward, done, truncated, info = env.step(action)
+            print(f"   Step {i+1}: action={action}, reward={reward}, done={done}")
+            if done or truncated:
+                obs, info = env.reset()
+                break
 
     except Exception as e:
         print(f"❌ Environment test failed: {e}")
@@ -446,7 +425,7 @@ def main():
 
     # Create Decision Transformer model
     print("🧠 Creating Decision Transformer model...")
-    action_dim = vec_env.action_space.n
+    action_dim = env.action_space.n
 
     model = DecisionTransformer(
         observation_shape=obs_shape,
@@ -469,16 +448,11 @@ def main():
 
     # Collect trajectories with checkpoints
     print(
-        f"📊 Collecting {args.total_timesteps:,} timesteps with {args.num_envs} parallel subprocess environments..."
+        f"📊 Collecting {args.total_timesteps:,} timesteps with single stable environment..."
     )
 
-    trajectories = collect_trajectories_with_checkpoints_vec(
-        vec_env,
-        args.total_timesteps,
-        model,
-        save_dir,
-        args.checkpoint_interval,
-        args.num_envs,
+    trajectories = collect_trajectories_with_checkpoints_single(
+        env, args.total_timesteps, model, save_dir, args.checkpoint_interval
     )
 
     print(f"✅ Collected {len(trajectories)} trajectories")
@@ -528,8 +502,8 @@ def main():
         print(f"   Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         print(f"   Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
-    # Close environments
-    vec_env.close()
+    # Close environment
+    env.close()
 
 
 if __name__ == "__main__":
