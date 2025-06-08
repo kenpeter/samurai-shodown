@@ -24,7 +24,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         env,
         reset_round=True,
         rendering=False,
-        max_episode_steps=10000,
+        max_episode_steps=5000,  # Shorter episodes to force action
         reward_coeff=3.0,
     ):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
@@ -84,12 +84,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"⚡ {self.env_id} SIMPLE Wrapper - Win/Loss Only")
-        print(f"   🎯 Rewards: Win +1, Lose -1, Nothing else")
+        print(f"⚡ {self.env_id} ATTACK-INCENTIVE Wrapper")
+        print(f"   🎯 Rewards: Win +1, Lose -1, Attack +0.1")
         print(f"   📏 Episode length: {max_episode_steps} steps")
         print(f"   ✅ Jump enabled: Full action space available")
         print(f"   🚀 Optimized for CUDA training with massive batches")
-        print(f"   💰 SIMPLE reward system: Only final outcomes matter")
+        print(f"   💰 Encourages attacking while keeping simple rewards")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -162,7 +162,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """SIMPLE reward system - Win +1, Lose -1, Nothing else"""
+        """SIMPLE reward system - Win +1, Lose -1, Small attack bonus"""
         reward = 0.0
         done = False
 
@@ -222,8 +222,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self._log_periodic_stats()
 
         else:
-            # During play - NO REWARD (0.0)
-            reward = 0.0
+            # Small attack incentive to encourage aggression
+            opponent_damage_dealt = self.prev_opponent_health - curr_opponent_health
+
+            if opponent_damage_dealt > 0:
+                # Small reward for dealing damage (encourages attacking)
+                reward = 0.1
+            else:
+                # No reward for passive play
+                reward = 0.0
 
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
