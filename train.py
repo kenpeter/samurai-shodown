@@ -182,8 +182,8 @@ def collect_trajectories_with_checkpoints_single(
     episode_count = 0
     last_checkpoint = 0
 
-    # MEMORY OPTIMIZATION: Limit trajectory buffer to prevent RAM overflow
-    MAX_TRAJECTORIES = 500  # Keep only 500 trajectories in memory at once
+    # AGGRESSIVE MEMORY OPTIMIZATION: Much smaller buffer
+    MAX_TRAJECTORIES = 100  # Keep only 100 trajectories in memory
 
     while current_timesteps < total_timesteps:
         trajectory = {"states": [], "actions": [], "rewards": []}
@@ -197,9 +197,9 @@ def collect_trajectories_with_checkpoints_single(
         while (
             not done
             and not truncated
-            and step_count < 1000
+            and step_count < 5000
             and current_timesteps < total_timesteps
-        ):
+        ):  # Much longer episodes
             action = env.action_space.sample()
 
             try:
@@ -228,14 +228,20 @@ def collect_trajectories_with_checkpoints_single(
 
         episode_count += 1
 
-        # AGGRESSIVE MEMORY MANAGEMENT: Keep only recent trajectories
+        # VERY AGGRESSIVE MEMORY MANAGEMENT: Keep only recent trajectories
         if len(trajectories) > MAX_TRAJECTORIES:
-            trajectories = trajectories[len(trajectories) // 2 :]
-            print(f"🧹 Memory cleanup: keeping last {len(trajectories)} trajectories")
+            # Remove oldest 75% of trajectories to free memory aggressively
+            keep_count = MAX_TRAJECTORIES // 4  # Keep only 25 trajectories
+            trajectories = trajectories[-keep_count:]
+            print(
+                f"🧹 AGGRESSIVE cleanup: keeping only last {len(trajectories)} trajectories"
+            )
 
-        # Periodic logging every 10,000 timesteps
-        if current_timesteps > 0 and current_timesteps % 10000 == 0:
-            recent_rewards = [sum(t["rewards"]) for t in trajectories[-50:]]
+        # More frequent logging and memory checks every 5,000 timesteps
+        if current_timesteps > 0 and current_timesteps % 5000 == 0:
+            recent_rewards = [
+                sum(t["rewards"]) for t in trajectories[-20:]
+            ]  # Check fewer trajectories
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
             win_episodes = (
                 sum(1 for r in recent_rewards if r > 0) if recent_rewards else 0
@@ -254,9 +260,14 @@ def collect_trajectories_with_checkpoints_single(
             )
 
             # Emergency memory cleanup if getting too high
-            if memory_percent > 80:
-                print(f"⚠️ HIGH MEMORY: {memory_percent:.1f}% - aggressive cleanup")
-                trajectories = trajectories[-200:]
+            if memory_percent > 30:  # Much lower threshold
+                print(f"⚠️ MEMORY WARNING: {memory_percent:.1f}% - emergency cleanup")
+                trajectories = trajectories[-10:]  # Keep only 10 most recent
+
+            # Force garbage collection
+            import gc
+
+            gc.collect()
 
     # Save final checkpoint
     save_checkpoint(model, current_timesteps, save_dir)
