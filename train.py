@@ -171,9 +171,9 @@ def save_checkpoint(model, timesteps, save_dir):
 def collect_trajectories_with_checkpoints_single(
     env, total_timesteps, model, save_dir, checkpoint_interval=300000
 ):
-    """Collect trajectories with periodic model saving using single stable environment"""
+    """Collect trajectories with periodic model saving using single stable environment - MEMORY OPTIMIZED"""
     print(
-        f"🎮 Collecting {total_timesteps:,} timesteps with single stable environment..."
+        f"🎮 Collecting {total_timesteps:,} timesteps with MEMORY OPTIMIZED collection..."
     )
     print(f"💾 Checkpoints every {checkpoint_interval:,} steps")
 
@@ -181,6 +181,9 @@ def collect_trajectories_with_checkpoints_single(
     current_timesteps = 0
     episode_count = 0
     last_checkpoint = 0
+
+    # MEMORY OPTIMIZATION: Limit trajectory buffer to prevent RAM overflow
+    MAX_TRAJECTORIES = 500  # Keep only 500 trajectories in memory at once
 
     while current_timesteps < total_timesteps:
         trajectory = {"states": [], "actions": [], "rewards": []}
@@ -194,10 +197,9 @@ def collect_trajectories_with_checkpoints_single(
         while (
             not done
             and not truncated
-            and step_count < 3000
+            and step_count < 1000
             and current_timesteps < total_timesteps
         ):
-            # Simple random policy
             action = env.action_space.sample()
 
             try:
@@ -226,9 +228,14 @@ def collect_trajectories_with_checkpoints_single(
 
         episode_count += 1
 
-        # Periodic logging every 25,000 timesteps
-        if current_timesteps > 0 and current_timesteps % 25000 == 0:
-            recent_rewards = [sum(t["rewards"]) for t in trajectories[-100:]]
+        # AGGRESSIVE MEMORY MANAGEMENT: Keep only recent trajectories
+        if len(trajectories) > MAX_TRAJECTORIES:
+            trajectories = trajectories[len(trajectories) // 2 :]
+            print(f"🧹 Memory cleanup: keeping last {len(trajectories)} trajectories")
+
+        # Periodic logging every 10,000 timesteps
+        if current_timesteps > 0 and current_timesteps % 10000 == 0:
+            recent_rewards = [sum(t["rewards"]) for t in trajectories[-50:]]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
             win_episodes = (
                 sum(1 for r in recent_rewards if r > 0) if recent_rewards else 0
@@ -237,18 +244,25 @@ def collect_trajectories_with_checkpoints_single(
                 (win_episodes / len(recent_rewards) * 100) if recent_rewards else 0
             )
 
+            # Memory usage check
+            memory_usage = psutil.virtual_memory()
+            memory_percent = memory_usage.percent
+            memory_gb = memory_usage.used / (1024**3)
+
             print(
-                f"   📊 Timesteps: {current_timesteps:,}/{total_timesteps:,} | "
-                f"Episodes: {episode_count:,} | "
-                f"Win Rate: {win_rate:.1f}% | "
-                f"Avg Reward: {avg_reward:.2f}"
+                f"   📊 {current_timesteps:,}/{total_timesteps:,} | Eps: {episode_count:,} | Traj: {len(trajectories)} | Win: {win_rate:.1f}% | RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
             )
+
+            # Emergency memory cleanup if getting too high
+            if memory_percent > 80:
+                print(f"⚠️ HIGH MEMORY: {memory_percent:.1f}% - aggressive cleanup")
+                trajectories = trajectories[-200:]
 
     # Save final checkpoint
     save_checkpoint(model, current_timesteps, save_dir)
 
     print(
-        f"✅ Collected {len(trajectories):,} valid trajectories over {current_timesteps:,} timesteps"
+        f"✅ Collected {len(trajectories):,} trajectories over {current_timesteps:,} timesteps"
     )
     return trajectories
 
@@ -374,9 +388,9 @@ def main():
         optimal_batch_size = calculate_optimal_batch_size(
             obs_shape, args.context_length, 12
         )
-        args.batch_size = max(8, optimal_batch_size)  # Minimum batch size of 8
+        args.batch_size = max(8, optimal_batch_size)  # Keep massive batch size
 
-    print(f"🎯 Using batch size: {args.batch_size}")
+    print(f"🎯 Using MASSIVE batch size: {args.batch_size}")
 
     save_dir = "trained_models"
     os.makedirs(save_dir, exist_ok=True)
