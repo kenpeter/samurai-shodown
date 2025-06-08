@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Custom wrapper with exponential win/loss rewards and jump prevention"""
+    """Custom wrapper with exponential win/loss rewards - NO JUMP PREVENTION"""
 
     # Global tracking across all environments
     _global_stats = {
@@ -43,7 +43,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Reward coefficient
         self.reward_coeff = reward_coeff
 
-        # Episode management - LONGER episodes for larger batches
+        # Episode management
         self.max_episode_steps = max_episode_steps
         self.episode_steps = 0
         self.reset_round = reset_round
@@ -84,11 +84,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"⚡ {self.env_id} CUSTOM Wrapper - Custom Reward Formulas")
+        print(f"⚡ {self.env_id} CUDA Wrapper - Full Action Space")
         print(f"   🎯 Rewards: Custom math formulas for win/loss/damage")
-        print(f"   📏 Episode length: {max_episode_steps} steps (for large batches)")
-        print(f"   🚫 Jump prevention: UP direction blocked")
-        print(f"   🚀 Optimized for fewer envs, larger batch sizes")
+        print(f"   📏 Episode length: {max_episode_steps} steps")
+        print(f"   ✅ Jump enabled: Full action space available")
+        print(f"   🚀 Optimized for CUDA training with massive batches")
         print(f"   💰 Reward coefficient: {reward_coeff}")
 
     def _process_frame(self, rgb_frame):
@@ -141,7 +141,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         if time_since_last_log >= self.log_interval:
             global_stats = SamuraiShowdownCustomWrapper._global_stats
 
-            print(f"\n📊 CUSTOM REWARD STATS:")
+            print(f"\n📊 CUDA TRAINING STATS:")
 
             for env_id, stats in global_stats["env_stats"].items():
                 if stats["total_rounds"] > 0:
@@ -265,11 +265,24 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.frame_stack.append(zero_frame)
 
         stacked_obs = self._stack_observation()
+
+        self.episode_steps += 1
+
+        if self.episode_steps >= self.max_episode_steps:
+            truncated = True
+
+        return stacked_obs, custom_reward, done, truncated, info
+
+    @classmethod
+    def print_final_stats(cls):
+        """Print final statistics when training ends"""
+        passobservation()
         return stacked_obs, info
 
     def step(self, action):
-        """Action filtering and custom rewards"""
-        # Convert action to int for processing
+        """Process action - NO JUMP PREVENTION - Full action space"""
+        
+        # Convert action to proper format but don't filter anything
         try:
             if hasattr(action, "shape") and action.shape == ():
                 action_int = int(action)
@@ -282,29 +295,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError):
             action_int = 0
 
-        # Prevent jumping - stable-retro uses MultiBinary action space
-        # Button order: ["B", "Y", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT", "A", "X", "L", "R"]
-        # For Neo Geo: ["B", "NULL", "SELECT", "START", "UP", "DOWN", "LEFT", "RIGHT", "A", "C", "D", "E"]
-        # UP is at index 4, so we need to prevent any action array with action[4] = 1
-
-        if hasattr(self.env.action_space, "n") and self.env.action_space.n > 8:
-            # This is a MultiBinary action space - convert action to array
-            if hasattr(action, "__len__") and len(action) > 4:
-                # Direct array input
-                if len(action) > 4 and action[4] == 1:
-                    action[4] = 0  # Block UP direction
-            else:
-                # Single integer input - need to convert to MultiBinary array
-                # Just convert jump action to neutral (all zeros)
-                if (
-                    action_int == 4 or action_int > 10
-                ):  # UP or complex actions often involving UP
-                    action = 0  # Convert to neutral action
-        else:
-            # Simple discrete action space - block suspected jump actions
-            if action_int in [1, 4, 7, 8, 9]:  # Various possible UP actions
-                action = 0
-
+        # Pass action through without any filtering - FULL ACTION SPACE
+        # This allows jumping, special moves, combos, etc.
+        
         observation, reward, done, truncated, info = self.env.step(action)
 
         curr_player_health, curr_opponent_health = self._extract_health(info)
@@ -317,16 +310,4 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         processed_frame = self._process_frame(observation)
         self.frame_stack.append(processed_frame)
-        stacked_obs = self._stack_observation()
-
-        self.episode_steps += 1
-
-        if self.episode_steps >= self.max_episode_steps:
-            truncated = True
-
-        return stacked_obs, custom_reward, done, truncated, info
-
-    @classmethod
-    def print_final_stats(cls):
-        """Print final statistics when training ends"""
-        pass
+        stacked_obs = self._stack_
