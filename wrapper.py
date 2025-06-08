@@ -244,7 +244,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return reward, done
 
     def reset(self, **kwargs):
-        """Reset environment"""
+        """Reset environment - FIXED"""
         result = self.env.reset(**kwargs)
         if isinstance(result, tuple):
             observation, info = result
@@ -265,23 +265,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.frame_stack.append(zero_frame)
 
         stacked_obs = self._stack_observation()
-
-        self.episode_steps += 1
-
-        if self.episode_steps >= self.max_episode_steps:
-            truncated = True
-
-        return stacked_obs, custom_reward, done, truncated, info
-
-    @classmethod
-    def print_final_stats(cls):
-        """Print final statistics when training ends"""
-        passobservation()
+        # FIXED: Only return observation and info in reset
         return stacked_obs, info
 
     def step(self, action):
         """Process action - NO JUMP PREVENTION - Full action space"""
-        
+
         # Convert action to proper format but don't filter anything
         try:
             if hasattr(action, "shape") and action.shape == ():
@@ -297,7 +286,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # Pass action through without any filtering - FULL ACTION SPACE
         # This allows jumping, special moves, combos, etc.
-        
+
         observation, reward, done, truncated, info = self.env.step(action)
 
         curr_player_health, curr_opponent_health = self._extract_health(info)
@@ -310,4 +299,16 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         processed_frame = self._process_frame(observation)
         self.frame_stack.append(processed_frame)
-        stacked_obs = self._stack_
+        stacked_obs = self._stack_observation()
+
+        self.episode_steps += 1
+
+        if self.episode_steps >= self.max_episode_steps:
+            truncated = True
+
+        return stacked_obs, custom_reward, done, truncated, info
+
+    @classmethod
+    def print_final_stats(cls):
+        """Print final statistics when training ends"""
+        pass

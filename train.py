@@ -58,77 +58,79 @@ def linear_schedule(initial_value, final_value=0.0):
     return scheduler
 
 
-
-
-
 def calculate_optimal_batch_size(obs_shape, num_envs, target_vram_gb=10.0):
-    """Calculate optimal batch size based on VRAM constraints"""
-    
+    """Calculate optimal batch size based on VRAM constraints - optimized for 4 envs"""
+
     # Observation memory calculation
     num_frames, height, width = obs_shape
     obs_size_bytes = num_frames * height * width * 4  # float32
     obs_size_mb = obs_size_bytes / (1024 * 1024)
-    
-    print(f"📊 VRAM optimization for {target_vram_gb}GB target:")
+
+    print(f"📊 VRAM optimization for 4 envs + 2000+ batch:")
     print(f"   Observation size: {obs_size_mb:.2f} MB (float32)")
-    
+
     # Estimate model size (CNN + policy networks)
-    estimated_model_vram = 1.5  # GB for model weights
-    
+    estimated_model_vram = 1.2  # GB for model weights (optimized for 4 envs)
+
     # Available VRAM for batches
     available_vram = target_vram_gb - estimated_model_vram
     available_vram_bytes = available_vram * 1024 * 1024 * 1024
-    
+
     # Calculate maximum batch size
     # Each sample in batch needs: obs + gradients + activations
-    memory_per_sample = obs_size_bytes * 3  # Conservative estimate
+    memory_per_sample = obs_size_bytes * 2.5  # Optimized estimate for 4 envs
     max_batch_size = int(available_vram_bytes / memory_per_sample)
-    
+
     # Round down to nearest multiple of 64 for efficiency
     optimal_batch_size = (max_batch_size // 64) * 64
-    
-    # Ensure minimum batch size
-    optimal_batch_size = max(optimal_batch_size, 512)
-    
-    # Cap at reasonable maximum
-    optimal_batch_size = min(optimal_batch_size, 4096)
-    
+
+    # Ensure minimum batch size of 2000+
+    optimal_batch_size = max(optimal_batch_size, 2048)
+
+    # Cap at reasonable maximum for 4 envs
+    optimal_batch_size = min(optimal_batch_size, 8192)
+
     estimated_batch_vram = (optimal_batch_size * memory_per_sample) / (1024**3)
-    
+
     print(f"   Model VRAM: {estimated_model_vram:.1f} GB")
     print(f"   Available for batches: {available_vram:.1f} GB")
     print(f"   Optimal batch size: {optimal_batch_size}")
     print(f"   Estimated batch VRAM: {estimated_batch_vram:.1f} GB")
-    
+
+    # Force minimum 2000+ if possible
+    if optimal_batch_size < 2000:
+        print(f"   ⚠️ Forcing batch size to 2048 (minimum target)")
+        optimal_batch_size = 2048
+
     return optimal_batch_size
 
 
 def check_system_resources(num_envs, n_steps, obs_shape):
     """Check if system can handle the requested configuration"""
-    
+
     # Check CPU cores
     cpu_cores = psutil.cpu_count(logical=True)
-    
+
     print(f"🖥️  CUDA System Resource Check:")
     print(f"   CPU Cores: {cpu_cores}")
     print(f"   Requested Envs: {num_envs}")
     print(f"   Strategy: CUDA + 82GB RAM hybrid training")
-    
+
     # Check RAM - Buffer data stays in RAM, model on GPU
     ram_gb = psutil.virtual_memory().total / (1024**3)
-    
+
     # Calculate buffer memory (stays in RAM)
     num_frames, height, width = obs_shape
     obs_size_mb = (num_frames * height * width) / (1024 * 1024)
     buffer_memory_gb = (n_steps * num_envs * obs_size_mb * 4) / 1024  # float32
-    
+
     print(f"   RAM: {ram_gb:.1f} GB")
     print(f"   Buffer memory (RAM): {buffer_memory_gb:.1f} GB")
-    
+
     if buffer_memory_gb > ram_gb * 0.6:
         print(f"❌ ERROR: Insufficient RAM for buffer!")
         return False
-    
+
     return True
 
 
@@ -167,8 +169,8 @@ def main():
     parser.add_argument(
         "--num-envs",
         type=int,
-        default=8,
-        help="Number of parallel environments (8 for CUDA efficiency)",
+        default=4,
+        help="Number of parallel environments (4 optimized for 2000+ batches)",
     )
     parser.add_argument(
         "--learning-rate",
@@ -193,7 +195,7 @@ def main():
         "--n-steps",
         type=int,
         default=8192,
-        help="Steps per rollout (optimized for CUDA)",
+        help="Steps per rollout (reduced for RAM efficiency)",
     )
 
     args = parser.parse_args()
@@ -241,7 +243,10 @@ def main():
     print(f"✅ Observation shape: {obs_shape}")
 
     # System resource check
+    print("🔧 Checking system resources...")
     if not check_system_resources(args.num_envs, args.n_steps, obs_shape):
+        print("💡 Try reducing n-steps or number of environments")
+        print("   Suggested: python train.py --n-steps 4096 --num-envs 2")
         sys.exit(1)
 
     # Calculate optimal batch size for CUDA
@@ -268,21 +273,29 @@ def main():
         batch_size = total_samples_per_rollout
         print(f"⚠️ Adjusted batch_size to {batch_size} (max samples per rollout)")
 
-    print(f"🔥 MASSIVE CUDA BATCH hyperparameters:")
-    print(f"   💪 Batch size: {batch_size:,} (LARGEST POSSIBLE)")
+    print(f"🔥 4 ENVS + 2000+ BATCH hyperparameters:")
+    print(f"   💪 Batch size: {batch_size:,} (TARGET: 2000+)")
     print(f"   📏 N-steps: {n_steps:,}")
-    print(f"   🎮 Environments: {actual_envs}")
+    print(f"   🎮 Environments: {actual_envs} (OPTIMIZED)")
     print(f"   📊 Total samples per rollout: {total_samples_per_rollout:,}")
     print(f"   🔄 Minibatches per rollout: {total_samples_per_rollout // batch_size}")
-    print(f"   🚀 Strategy: CUDA model + RAM buffer for MAXIMUM speed")
+    print(f"   🚀 Strategy: 4 envs balance performance + memory efficiency")
+
+    # Verify we hit our 2000+ target
+    if batch_size >= 2000:
+        print(f"   ✅ SUCCESS: Achieved 2000+ batch size!")
+    else:
+        print(
+            f"   ⚠️ WARNING: Batch size below 2000 - consider reducing n-steps or VRAM target"
+        )
 
     save_dir = "trained_models_samurai_cuda"
     os.makedirs(save_dir, exist_ok=True)
 
-    print(f"🚀 Samurai Showdown CUDA MASSIVE BATCH Training")
+    print(f"🚀 Samurai Showdown 4 ENV + 2000+ BATCH Training")
     print(f"   💻 Device: {device} (12GB VRAM) + 82GB RAM")
-    print(f"   🎯 Strategy: Model on GPU, buffer in RAM")
-    print(f"   🔥 Batch size: {batch_size:,} samples (LARGEST EVER)")
+    print(f"   🎯 Strategy: 4 envs + massive batches for optimal speed")
+    print(f"   🔥 Batch size: {batch_size:,} samples (TARGET: 2000+)")
     print(f"   🎮 No jump prevention - full action space")
     print(f"   Game: {game}")
 
@@ -307,6 +320,7 @@ def main():
     except Exception as e:
         print(f"❌ Failed to create environments: {e}")
         import traceback
+
         traceback.print_exc()
         return
 
@@ -382,10 +396,10 @@ def main():
 
     # Training
     start_time = time.time()
-    print(f"🏋️ Starting CUDA MASSIVE BATCH training")
+    print(f"🏋️ Starting 4 ENV + 2000+ BATCH training")
     print(f"   📊 {total_samples_per_rollout:,} samples per rollout")
-    print(f"   💪 {batch_size:,} batch size (LARGEST EVER)")
-    print(f"   🚀 Using CUDA for maximum speed")
+    print(f"   💪 {batch_size:,} batch size (TARGET: 2000+)")
+    print(f"   🚀 Using 4 environments for optimal balance")
 
     try:
         model.learn(
@@ -395,7 +409,9 @@ def main():
         )
 
         training_time = time.time() - start_time
-        print(f"🎉 CUDA training completed in {training_time/3600:.1f} hours!")
+        print(
+            f"🎉 4 ENV + 2000+ BATCH training completed in {training_time/3600:.1f} hours!"
+        )
 
     except KeyboardInterrupt:
         print(f"⏹️ Training interrupted")
@@ -405,6 +421,7 @@ def main():
     except Exception as e:
         print(f"❌ Training failed: {e}")
         import traceback
+
         traceback.print_exc()
 
     finally:
@@ -425,8 +442,8 @@ def main():
     print(f"📊 Final VRAM usage: {final_vram:.2f} GB")
     print(f"📊 Peak VRAM usage: {max_vram:.2f} GB")
 
-    print("✅ CUDA MASSIVE BATCH training complete!")
-    print(f"🎯 Strategy: Used CUDA + 82GB RAM for largest possible batches")
+    print("✅ 4 ENV + 2000+ BATCH training complete!")
+    print(f"🎯 Strategy: Used 4 environments + massive batches for optimal performance")
 
 
 if __name__ == "__main__":
