@@ -84,12 +84,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"⚡ {self.env_id} CUDA Wrapper - Full Action Space")
-        print(f"   🎯 Rewards: Custom math formulas for win/loss/damage")
+        print(f"⚡ {self.env_id} SIMPLE Wrapper - Win/Loss Only")
+        print(f"   🎯 Rewards: Win +1, Lose -1, Nothing else")
         print(f"   📏 Episode length: {max_episode_steps} steps")
         print(f"   ✅ Jump enabled: Full action space available")
         print(f"   🚀 Optimized for CUDA training with massive batches")
-        print(f"   💰 Reward coefficient: {reward_coeff}")
+        print(f"   💰 SIMPLE reward system: Only final outcomes matter")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB frame to grayscale and resize"""
@@ -141,7 +141,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         if time_since_last_log >= self.log_interval:
             global_stats = SamuraiShowdownCustomWrapper._global_stats
 
-            print(f"\n📊 CUDA TRAINING STATS:")
+            print(f"\n📊 SIMPLE REWARD TRAINING STATS:")
 
             for env_id, stats in global_stats["env_stats"].items():
                 if stats["total_rounds"] > 0:
@@ -162,7 +162,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """Custom reward formulas - exponential scaling based on health remaining"""
+        """SIMPLE reward system - Win +1, Lose -1, Nothing else"""
         reward = 0.0
         done = False
 
@@ -172,13 +172,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # WIN - Custom formula
-                custom_reward = (
-                    math.pow(
-                        self.full_hp, (curr_player_health + 1) / (self.full_hp + 1)
-                    )
-                    * self.reward_coeff
-                )
+                # WIN - Simple +1 reward
+                reward = 1.0
 
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
@@ -191,20 +186,16 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 ] = self.total_rounds
 
                 print(
-                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%}) Reward: {custom_reward:.3f}"
+                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%}) Reward: +1.0"
                 )
-
-                reward = custom_reward
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
                 return reward, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                # LOSS - Custom formula
-                custom_reward = -math.pow(
-                    self.full_hp, (curr_opponent_health + 1) / (self.full_hp + 1)
-                )
+                # LOSS - Simple -1 reward
+                reward = -1.0
 
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
@@ -217,11 +208,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 ] = self.total_rounds
 
                 print(
-                    f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%}) Reward: {custom_reward:.3f}"
+                    f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%}) Reward: -1.0"
                 )
 
-                reward = custom_reward
-
+                reward = -1.0
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
                 return reward, True
@@ -232,11 +222,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self._log_periodic_stats()
 
         else:
-            # In-play reward - damage differential
-            custom_reward = self.reward_coeff * (
-                self.prev_opponent_health - curr_opponent_health
-            ) - (self.prev_player_health - curr_player_health)
-            reward = custom_reward
+            # During play - NO REWARD (0.0)
+            reward = 0.0
 
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
