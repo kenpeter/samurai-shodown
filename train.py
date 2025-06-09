@@ -81,99 +81,119 @@ def model_based_action_selection(
     timestep,
     device="cuda",
     temperature=1.0,
-    context_length=30,
+    context_length=20,
 ):
-    """Use the trained model to select actions with fixed sequence length"""
+    """Use the trained model to select actions with GUARANTEED fixed sequence length"""
     try:
         model.eval()
         with torch.no_grad():
-            # Ensure we have at least some context
+            # Ensure we have context
             if len(context_states) == 0:
                 return None
 
-            # Convert to numpy arrays
-            states_array = np.array(context_states)
-            actions_array = (
-                np.array(context_actions) if len(context_actions) > 0 else np.array([0])
-            )
-            rewards_array = (
-                np.array(context_rewards)
-                if len(context_rewards) > 0
-                else np.array([0.0])
-            )
+            # FIXED LENGTH APPROACH: Always use exactly 20 steps (reduced for stability)
+            fixed_len = 20  # Use smaller fixed length to avoid tensor issues
 
-            # Pad or truncate to fixed length
-            seq_len = min(len(states_array), context_length)
+            # Get states, actions, rewards with proper alignment
+            states_list = list(context_states)
+            actions_list = list(context_actions)
+            rewards_list = list(context_rewards)
 
-            # Take the most recent seq_len items
-            if len(states_array) > seq_len:
-                states_array = states_array[-seq_len:]
-                actions_array = (
-                    actions_array[-seq_len:]
-                    if len(actions_array) >= seq_len
-                    else np.pad(
-                        actions_array,
-                        (seq_len - len(actions_array), 0),
-                        mode="constant",
-                        constant_values=0,
-                    )[-seq_len:]
-                )
-                rewards_array = (
-                    rewards_array[-seq_len:]
-                    if len(rewards_array) >= seq_len
-                    else np.pad(
-                        rewards_array,
-                        (seq_len - len(rewards_array), 0),
-                        mode="constant",
-                        constant_values=0.0,
-                    )[-seq_len:]
-                )
+            # Ensure actions and rewards align with states (actions/rewards are 1 step behind states)
+            if len(actions_list) == len(states_list):
+                # Remove last action/reward to align properly
+                actions_list = actions_list[:-1] if len(actions_list) > 0 else []
+                rewards_list = rewards_list[:-1] if len(rewards_list) > 0 else []
+
+            # Pad actions and rewards to match states length - 1
+            target_ar_len = len(states_list) - 1
+            while len(actions_list) < target_ar_len:
+                actions_list.append(0)
+            while len(rewards_list) < target_ar_len:
+                rewards_list.append(0.0)
+
+            # Truncate actions and rewards if too long
+            actions_list = actions_list[:target_ar_len]
+            rewards_list = rewards_list[:target_ar_len]
+
+            # Now handle the sequence length
+            if len(states_list) >= fixed_len:
+                # Use last fixed_len states
+                states_array = np.array(states_list[-fixed_len:])
+                actions_array = np.array(
+                    actions_list[-(fixed_len - 1) :] + [0]
+                )  # Pad last action
+                rewards_array = np.array(
+                    rewards_list[-(fixed_len - 1) :] + [0.0]
+                )  # Pad last reward
             else:
-                # Pad to seq_len
-                pad_length = seq_len - len(states_array)
-                if pad_length > 0:
-                    # Pad states with zeros
-                    pad_states = np.zeros(
-                        (pad_length,) + states_array.shape[1:], dtype=states_array.dtype
-                    )
-                    states_array = np.concatenate([pad_states, states_array], axis=0)
+                # Pad to fixed_len
+                states_array = np.array(states_list)
+                actions_array = np.array(actions_list + [0])  # Add dummy action
+                rewards_array = np.array(rewards_list + [0.0])  # Add dummy reward
 
-                    # Pad actions with zeros
-                    actions_array = np.pad(
-                        actions_array,
-                        (pad_length, 0),
-                        mode="constant",
-                        constant_values=0,
-                    )
+                # Pad states
+                pad_states = np.zeros(
+                    (fixed_len - len(states_array),) + states_array.shape[1:],
+                    dtype=states_array.dtype,
+                )
+                states_array = np.concatenate([pad_states, states_array], axis=0)
 
-                    # Pad rewards with zeros
-                    rewards_array = np.pad(
-                        rewards_array,
-                        (pad_length, 0),
-                        mode="constant",
-                        constant_values=0.0,
-                    )
+                # Pad actions and rewards
+                actions_array = np.pad(
+                    actions_array,
+                    (fixed_len - len(actions_array), 0),
+                    constant_values=0,
+                )
+                rewards_array = np.pad(
+                    rewards_array,
+                    (fixed_len - len(rewards_array), 0),
+                    constant_values=0.0,
+                )
 
-            # Ensure exact length
-            states_array = states_array[:seq_len]
-            actions_array = actions_array[:seq_len]
-            rewards_array = rewards_array[:seq_len]
+            # GUARANTEE exact lengths
+            states_array = states_array[:fixed_len]
+            actions_array = actions_array[:fixed_len]
+            rewards_array = rewards_array[:fixed_len]
+
+            # Triple check - all arrays must be exactly fixed_len
+            assert (
+                len(states_array) == fixed_len
+            ), f"States length {len(states_array)} != {fixed_len}"
+            assert (
+                len(actions_array) == fixed_len
+            ), f"Actions length {len(actions_array)} != {fixed_len}"
+            assert (
+                len(rewards_array) == fixed_len
+            ), f"Rewards length {len(rewards_array)} != {fixed_len}"
 
             # Calculate returns-to-go
-            returns_to_go = np.zeros_like(rewards_array, dtype=np.float32)
+            returns_to_go = np.zeros(fixed_len, dtype=np.float32)
             running_return = 0
             gamma = 0.99
-            for i in reversed(range(len(rewards_array))):
+            for i in reversed(range(fixed_len)):
                 running_return = rewards_array[i] + gamma * running_return
                 returns_to_go[i] = running_return
 
-            # Convert to tensors
+            # Convert to tensors with guaranteed shapes
             states_tensor = (
                 torch.from_numpy(states_array).float().unsqueeze(0) / 255.0
-            )  # Normalize
-            actions_tensor = torch.from_numpy(actions_array).long().unsqueeze(0)
-            rtg_tensor = torch.from_numpy(returns_to_go).float().unsqueeze(0)
-            timesteps_tensor = torch.arange(seq_len).long().unsqueeze(0)
+            )  # [1, fixed_len, ...]
+            actions_tensor = (
+                torch.from_numpy(actions_array).long().unsqueeze(0)
+            )  # [1, fixed_len]
+            rtg_tensor = (
+                torch.from_numpy(returns_to_go).float().unsqueeze(0)
+            )  # [1, fixed_len]
+            timesteps_tensor = (
+                torch.arange(fixed_len).long().unsqueeze(0)
+            )  # [1, fixed_len]
+
+            # Final shape verification
+            assert states_tensor.shape[1] == fixed_len
+            assert actions_tensor.shape[1] == fixed_len
+            assert rtg_tensor.shape[1] == fixed_len
+            assert timesteps_tensor.shape[1] == fixed_len
 
             # Move to device
             states_tensor = states_tensor.to(device)
@@ -240,6 +260,9 @@ def collect_trajectories_with_model(
         context_actions = collections.deque(maxlen=context_length)
         context_rewards = collections.deque(maxlen=context_length)
 
+        # Initialize context with first state
+        context_states.append(obs.copy())
+
         while (
             not done
             and not truncated
@@ -251,22 +274,42 @@ def collect_trajectories_with_model(
             # Decide whether to use model or random action
             use_model = (
                 model_is_trained
-                and len(context_states) >= min(10, context_length)  # Need some context
+                and len(context_states)
+                >= min(15, context_length)  # Need more context for stability
+                and len(context_actions)
+                >= min(10, context_length - 5)  # Ensure actions exist
                 and np.random.random() < use_model_probability
             )
 
             if use_model:
-                # Use model for action selection
-                action = model_based_action_selection(
-                    model,
-                    list(context_states),
-                    list(context_actions),
-                    list(context_rewards),
-                    step_count,
-                    device=device,
-                    temperature=1.2,  # Slightly random for exploration
-                    context_length=context_length,
+                # Ensure context arrays are the same length before passing to model
+                min_context_len = min(
+                    len(context_states),
+                    len(context_actions) + 1,
+                    len(context_rewards) + 1,
                 )
+                if min_context_len >= 10:  # Need minimum context
+                    # Use model for action selection
+                    action = model_based_action_selection(
+                        model,
+                        list(context_states)[
+                            -min_context_len:
+                        ],  # Truncate to same length
+                        (
+                            list(context_actions)[-(min_context_len - 1) :]
+                            if len(context_actions) > 0
+                            else [0]
+                        ),  # Actions are 1 less than states
+                        (
+                            list(context_rewards)[-(min_context_len - 1) :]
+                            if len(context_rewards) > 0
+                            else [0.0]
+                        ),  # Rewards are 1 less than states
+                        step_count,
+                        device=device,
+                        temperature=1.2,  # Slightly random for exploration
+                        context_length=20,  # Use reduced context length for stability
+                    )
 
                 if action is not None:
                     model_actions += 1
@@ -293,9 +336,8 @@ def collect_trajectories_with_model(
                 step_count += 1
 
                 # Update context for next action selection
-                if len(context_states) > 0:  # Need at least one state
-                    context_actions.append(action)
-                    context_rewards.append(reward)
+                context_actions.append(action)
+                context_rewards.append(reward)
 
                 if not done and not truncated:
                     trajectory["states"].append(obs.copy())
