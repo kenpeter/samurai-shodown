@@ -342,8 +342,41 @@ def main():
     # Load existing model if resuming
     if args.resume and os.path.exists(args.resume):
         print(f"📂 Loading model from: {args.resume}")
-        model.load_state_dict(torch.load(args.resume, map_location=device))
-        print(f"✅ Model loaded successfully")
+
+        if args.resume.endswith(".zip"):
+            # Extract and load from .zip
+            import zipfile
+            import tempfile
+
+            with zipfile.ZipFile(args.resume, "r") as zip_ref:
+                pth_files = [f for f in zip_ref.namelist() if f.endswith(".pth")]
+                if not pth_files:
+                    print(f"❌ No .pth file found in zip")
+                    return
+
+                # Extract to temp file and load
+                with tempfile.NamedTemporaryFile(
+                    suffix=".pth", delete=False
+                ) as temp_file:
+                    temp_file.write(zip_ref.read(pth_files[0]))
+                    temp_path = temp_file.name
+
+            try:
+                model.load_state_dict(torch.load(temp_path, map_location=device))
+                print(f"✅ Model loaded from .zip")
+            except Exception as e:
+                print(f"❌ Error loading: {e}")
+                return
+            finally:
+                os.unlink(temp_path)
+        else:
+            # Direct .pth loading
+            try:
+                model.load_state_dict(torch.load(args.resume, map_location=device))
+                print(f"✅ Model loaded")
+            except Exception as e:
+                print(f"❌ Error loading: {e}")
+                return
 
     param_count = sum(p.numel() for p in model.parameters())
     print(f"✅ Model created with {param_count:,} parameters")
