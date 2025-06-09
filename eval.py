@@ -2,18 +2,19 @@ import os
 import argparse
 import time
 import numpy as np
+import torch
+import zipfile
+import tempfile
 
 import retro
 import gymnasium as gym
-from stable_baselines3 import PPO
 
-# Import the wrapper
-from wrapper import SamuraiShowdownCustomWrapper
+# Import the wrapper and Decision Transformer
+from wrapper import SamuraiShowdownCustomWrapper, DecisionTransformer
 
 
 def create_eval_env(game, state):
     """Create evaluation environment aligned with training setup"""
-    # Handle state file path
     if state and os.path.isfile(state):
         state_file = os.path.abspath(state)
         print(f"Using custom state file: {state_file}")
@@ -27,83 +28,163 @@ def create_eval_env(game, state):
         state=state_file,
         use_restricted_actions=retro.Actions.FILTERED,
         obs_type=retro.Observations.IMAGE,
-        render_mode="human",  # Enable rendering for human observation
+        render_mode="human",  # Enable rendering
     )
 
     # Apply custom wrapper with same settings as training
-    # IMPORTANT: Must match training wrapper configuration exactly!
     env = SamuraiShowdownCustomWrapper(
         env,
         reset_round=True,
         rendering=True,
-        max_episode_steps=5000,  # Match training configuration
+        max_episode_steps=5000,
     )
 
-    # Print observation space for debugging
-    print(f"🔍 Evaluation environment observation space: {env.observation_space.shape}")
-
+    print(f"🔍 Environment observation space: {env.observation_space.shape}")
     return env
 
 
-def convert_observation_format(obs, target_shape):
-    """Convert observation between different formats if needed"""
-    current_shape = obs.shape
+def load_decision_transformer_from_zip(zip_path, env, device="cuda"):
+    """Load Decision Transformer model from .zip file"""
+    print(f"📂 Loading model from: {zip_path}")
 
-    if current_shape == target_shape:
-        return obs
+    # Extract .pth file from .zip
+    with zipfile.ZipFile(zip_path, "r") as zip_ref:
+        # Find .pth file in zip
+        pth_files = [f for f in zip_ref.namelist() if f.endswith(".pth")]
+        if not pth_files:
+            raise ValueError("No .pth file found in zip archive")
 
-    # Handle shape mismatches
-    if len(current_shape) == 3 and len(target_shape) == 3:
-        # Check if it's just a dimension ordering issue
-        if (current_shape[0], current_shape[1], current_shape[2]) == (
-            target_shape[1],
-            target_shape[2],
-            target_shape[0],
-        ):
-            # Transpose from (H, W, C) to (C, H, W)
-            print(f"🔄 Converting observation from {current_shape} to {target_shape}")
-            return np.transpose(obs, (2, 0, 1))
-        elif (current_shape[0], current_shape[1], current_shape[2]) == (
-            target_shape[2],
-            target_shape[0],
-            target_shape[1],
-        ):
-            # Transpose from (C, H, W) to (H, W, C)
-            print(f"🔄 Converting observation from {current_shape} to {target_shape}")
-            return np.transpose(obs, (1, 2, 0))
+        pth_file = pth_files[0]
+        print(f"Found model file: {pth_file}")
 
-    # If shapes are completely different, try to resize
-    if len(current_shape) == 3 and len(target_shape) == 3:
-        if current_shape[0] == target_shape[0]:  # Same number of channels/frames
-            print(f"🔄 Resizing observation from {current_shape} to {target_shape}")
-            # Simple nearest neighbor resize for each frame
-            resized_frames = []
-            for i in range(current_shape[0]):
-                frame = obs[i]
-                # Simple resize using array indexing
-                h_ratio = frame.shape[0] / target_shape[1]
-                w_ratio = frame.shape[1] / target_shape[2]
-                h_indices = (np.arange(target_shape[1]) * h_ratio).astype(int)
-                w_indices = (np.arange(target_shape[2]) * w_ratio).astype(int)
-                resized_frame = frame[np.ix_(h_indices, w_indices)]
-                resized_frames.append(resized_frame)
-            return np.stack(resized_frames, axis=0)
+        # Extract to temporary file
+        with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as temp_file:
+            temp_file.write(zip_ref.read(pth_file))
+            temp_path = temp_file.name
 
-    print(
-        f"⚠️  Warning: Cannot convert observation shape {current_shape} to {target_shape}"
-    )
-    return obs
+    try:
+        # Create model with same architecture as training
+        obs_shape = env.observation_space.shape
+        action_dim = env.action_space.n
+
+        model = DecisionTransformer(
+            observation_shape=obs_shape,
+            action_dim=action_dim,
+            hidden_size=256,
+            n_layer=4,
+            n_head=4,
+            max_ep_len=2000,
+        )
+
+        # Load state dict
+        model.load_state_dict(torch.load(temp_path, map_location=device))
+        model.to(device)
+        model.eval()
+
+        print(f"✅ Model loaded successfully on {device}")
+        return model
+
+    finally:
+        # Clean up temp file
+        os.unlink(temp_path)
+
+
+class DecisionTransformerPlayer:
+    """Wrapper for Decision Transformer evaluation"""
+
+    def __init__(self, model, device, context_length=30):
+        self.model = model
+        self.device = device
+        self.context_length = context_length
+
+        # Initialize context buffers
+        self.reset_context()
+
+    def reset_context(self):
+        """Reset context for new episode"""
+        self.states = []
+        self.actions = []
+        self.returns_to_go = []
+        self.timesteps = []
+
+    def get_action(self, state, target_return=1.0):
+        """Get action from Decision Transformer"""
+        # Add current state to context
+        self.states.append(state)
+
+        # Calculate current timestep
+        current_timestep = len(self.states) - 1
+        self.timesteps.append(current_timestep)
+
+        # Set return-to-go (target performance)
+        self.returns_to_go.append(target_return)
+
+        # Trim context to maximum length
+        if len(self.states) > self.context_length:
+            self.states = self.states[-self.context_length :]
+            self.actions = self.actions[
+                -(self.context_length - 1) :
+            ]  # One less action than states
+            self.returns_to_go = self.returns_to_go[-self.context_length :]
+            self.timesteps = self.timesteps[-self.context_length :]
+
+        # Prepare tensors for model
+        states_tensor = (
+            torch.from_numpy(np.array(self.states)).float().unsqueeze(0).to(self.device)
+            / 255.0
+        )
+
+        # Pad actions if needed (actions are one less than states)
+        if len(self.actions) == 0:
+            actions_pad = [0]  # Dummy action for first step
+        else:
+            actions_pad = self.actions.copy()
+
+        # Pad to match states length
+        while len(actions_pad) < len(self.states):
+            actions_pad.append(0)
+
+        actions_tensor = (
+            torch.from_numpy(np.array(actions_pad)).long().unsqueeze(0).to(self.device)
+        )
+        returns_tensor = (
+            torch.from_numpy(np.array(self.returns_to_go))
+            .float()
+            .unsqueeze(0)
+            .to(self.device)
+        )
+        timesteps_tensor = (
+            torch.from_numpy(np.array(self.timesteps))
+            .long()
+            .unsqueeze(0)
+            .to(self.device)
+        )
+
+        # Get action from model
+        with torch.no_grad():
+            action = self.model.get_action(
+                states_tensor,
+                actions_tensor,
+                returns_tensor,
+                timesteps_tensor,
+                temperature=0.1,  # Low temperature for more deterministic actions
+            )
+
+        # Add action to context for next step
+        self.actions.append(action)
+
+        return action
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate trained Samurai Showdown Agent"
+        description="Evaluate trained Decision Transformer Samurai Showdown Agent"
     )
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_samurai/ppo_samurai_largebatch_2env_10000000_steps.zip",
-        help="Path to the trained model",
+        default="trained_models/decision_transformer_samurai_final.zip",
+        help="Path to the trained Decision Transformer model (.zip file)",
     )
     parser.add_argument(
         "--state-file",
@@ -123,15 +204,22 @@ def main():
         help="Use default game state (ignore state file)",
     )
     parser.add_argument(
-        "--deterministic",
-        action="store_true",
-        help="Use deterministic actions (less random)",
+        "--target-return",
+        type=float,
+        default=1.0,
+        help="Target return for Decision Transformer (higher = more aggressive)",
+    )
+    parser.add_argument(
+        "--context-length",
+        type=int,
+        default=30,
+        help="Context length for Decision Transformer",
     )
     parser.add_argument(
         "--fps",
         type=int,
         default=60,
-        help="Target FPS for rendering (default: 60)",
+        help="Target FPS for rendering",
     )
 
     args = parser.parse_args()
@@ -139,29 +227,29 @@ def main():
     # Check if model exists
     if not os.path.exists(args.model_path):
         print(f"❌ Error: Model file not found at {args.model_path}")
-        print("Available models in trained_models_samurai/:")
-        if os.path.exists("trained_models_samurai"):
-            for f in os.listdir("trained_models_samurai"):
+        print("Available models in trained_models/:")
+        if os.path.exists("trained_models"):
+            for f in os.listdir("trained_models"):
                 if f.endswith(".zip"):
                     print(f"   - {f}")
         return
 
     game = "SamuraiShodown-Genesis"
 
-    # Handle state file properly
+    # Handle state file
     if args.use_default_state:
         state_file = None
         print("Using default game state")
     else:
         state_file = args.state_file
 
-    print(f"🤖 Loading model from: {args.model_path}")
-    print(f"🎮 Using state file: {state_file if state_file else 'default'}")
-    print(f"🔄 Will run {args.episodes} episodes")
-    print(f"⚡ Running at {args.fps} FPS for smooth gameplay")
-    print(f"🎯 Deterministic actions: {'Yes' if args.deterministic else 'No'}")
-    print("\n🔧 Automatic observation format conversion enabled!")
-    print("\nPress Ctrl+C to quit at any time")
+    print(f"🤖 Decision Transformer Evaluation")
+    print(f"📂 Model: {args.model_path}")
+    print(f"🎮 State: {state_file if state_file else 'default'}")
+    print(f"🔄 Episodes: {args.episodes}")
+    print(f"🎯 Target Return: {args.target_return}")
+    print(f"📏 Context Length: {args.context_length}")
+    print(f"⚡ FPS: {args.fps}")
     print("=" * 60)
 
     # Create evaluation environment
@@ -170,41 +258,25 @@ def main():
         print("✅ Environment created successfully!")
     except Exception as e:
         print(f"❌ Error creating environment: {e}")
-        print("\n💡 Troubleshooting:")
-        print("   - Check if samurai.state file exists")
-        print("   - Try using --use-default-state flag")
-        print("   - Ensure SamuraiShodown-Genesis ROM is installed")
         return
 
-    # Load the trained model
+    # Load the Decision Transformer model
     try:
-        print("🧠 Loading model...")
-        # Try GPU first, fallback to CPU
-        try:
-            model = PPO.load(args.model_path, device="cuda")
-            print("✅ Model loaded on GPU!")
-        except:
-            model = PPO.load(args.model_path, device="cpu")
-            print("✅ Model loaded on CPU!")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"🔧 Using device: {device}")
 
-        # Check observation space compatibility
-        model_shape = model.observation_space.shape
-        env_shape = env.observation_space.shape
+        model = load_decision_transformer_from_zip(args.model_path, env, device)
 
-        print(f"🔍 Model expects observation shape: {model_shape}")
-        print(f"🔍 Environment provides shape: {env_shape}")
-
-        if model_shape != env_shape:
-            print("🔧 Observation shapes differ - will auto-convert during evaluation")
-        else:
-            print("✅ Observation shapes match perfectly!")
+        # Create player
+        player = DecisionTransformerPlayer(
+            model, device, context_length=args.context_length
+        )
 
     except Exception as e:
         print(f"❌ Error loading model: {e}")
-        print("\n💡 Common issues:")
-        print("   - Model was trained with different wrapper settings")
-        print("   - GPU/CPU compatibility issues")
-        print("   - Model file is corrupted")
+        import traceback
+
+        traceback.print_exc()
         return
 
     # Calculate frame timing
@@ -220,7 +292,10 @@ def main():
         for episode in range(args.episodes):
             print(f"\n⚔️  --- Episode {episode + 1}/{args.episodes} ---")
 
+            # Reset environment and player context
             obs, info = env.reset()
+            player.reset_context()
+
             episode_reward = 0
             step_count = 0
             episode_start_time = time.time()
@@ -230,15 +305,8 @@ def main():
             while True:
                 step_start_time = time.time()
 
-                # Convert observation format if needed
-                obs_for_model = convert_observation_format(
-                    obs, model.observation_space.shape
-                )
-
-                # Get action from the trained model
-                action, _states = model.predict(
-                    obs_for_model, deterministic=args.deterministic
-                )
+                # Get action from Decision Transformer
+                action = player.get_action(obs, target_return=args.target_return)
 
                 # Take step in environment
                 obs, reward, terminated, truncated, info = env.step(action)
@@ -255,8 +323,8 @@ def main():
                 if terminated or truncated:
                     break
 
-                # Optional: Add some info display every 5 seconds
-                if step_count % (args.fps * 5) == 0:  # Every 5 seconds
+                # Info display every 5 seconds
+                if step_count % (args.fps * 5) == 0:
                     player_hp = info.get("health", "?")
                     enemy_hp = info.get("enemy_health", "?")
                     print(
@@ -300,6 +368,7 @@ def main():
         print(f"   Wins: {total_wins}")
         print(f"   Losses: {total_losses}")
         print(f"   Draws/Timeouts: {total_episodes - total_wins - total_losses}")
+
         if total_episodes > 0:
             win_rate = (total_wins / total_episodes) * 100
             print(f"   Win Rate: {win_rate:.1f}%")
@@ -308,28 +377,26 @@ def main():
             print(f"   Average Reward: {avg_reward:.1f}")
             print(f"   Average Steps: {avg_steps:.0f}")
 
-        # Performance assessment
-        if total_episodes > 0:
+            # Performance assessment
             if win_rate >= 70:
-                print("🏆 Excellent performance!")
+                print("🏆 Excellent Decision Transformer performance!")
             elif win_rate >= 50:
-                print("👍 Good performance!")
+                print("👍 Good Decision Transformer performance!")
             elif win_rate >= 30:
-                print("📈 Improving performance!")
+                print("📈 Improving Decision Transformer performance!")
             else:
-                print("🔧 Needs more training!")
+                print("🔧 Decision Transformer needs more training!")
 
     except KeyboardInterrupt:
         print("\n\n⏹️  Evaluation interrupted by user")
     except Exception as e:
         print(f"\n❌ Error during evaluation: {e}")
-        print("💡 Check that your model and wrapper configurations are compatible")
         import traceback
 
         traceback.print_exc()
     finally:
         env.close()
-        print("\n✅ Evaluation complete!")
+        print("\n✅ Decision Transformer evaluation complete!")
 
 
 if __name__ == "__main__":
