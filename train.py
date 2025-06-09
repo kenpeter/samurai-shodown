@@ -233,13 +233,8 @@ def collect_trajectories_with_model(
     )
 
     # Define action sets at the beginning - THIS FIXES THE BUG!
-    # TACTICAL CLOSE-RANGE COMBAT - Smart positioning and effective attacks
-    close_range_attacks = [8, 9]  # Close punches/kicks (use when close)
-    mid_range_attacks = [10, 11]  # Mid-range attacks (use at distance)
-    attack_actions = close_range_attacks + mid_range_attacks  # All attacks
-    blocking_actions = [4, 5, 6, 7]  # Defensive actions (convert to movement)
-    movement_actions = [1, 2, 3]  # Movement to get close (important!)
-    jump_action = [0]  # Jump (limit but don't eliminate)
+    attack_actions = [8, 9, 10, 11]  # Common attack button mappings
+    blocking_actions = [4, 5, 6, 7]  # Common blocking/defensive actions
 
     trajectories = []
     current_timesteps = 0
@@ -332,91 +327,40 @@ def collect_trajectories_with_model(
                 action = env.action_space.sample()
                 random_actions += 1
 
-            # TACTICAL COMBAT STRATEGY - Smart positioning and effective attacks
+            # FORCE AGGRESSION: Bias action selection toward attacks
+            if np.random.random() < 0.4:  # 40% chance to force attack
+                action = np.random.choice(attack_actions)
 
-            # 1. PRESERVE GOOD DECISIONS: Don't override attacks (let model learn)
-            if action in attack_actions:
-                # Keep attack actions, but maybe optimize them
-                if action in mid_range_attacks and np.random.random() < 0.3:
-                    action = np.random.choice(
-                        close_range_attacks
-                    )  # Sometimes prefer close-range
-                # Otherwise keep the attack action as-is
+            # Reduce excessive jumping (action 0 is often jump)
+            if action == 0 and np.random.random() > 0.1:  # Reduced tolerance
+                action = np.random.choice(attack_actions)  # Force attack instead
 
-            # 2. CONVERT DEFENSE TO MOVEMENT: Get close instead of blocking
-            elif action in blocking_actions:
-                if np.random.random() < 0.6:  # 60% chance
-                    action = np.random.choice(movement_actions)  # Move to get close
-                else:
-                    action = np.random.choice(close_range_attacks)  # Or attack if close
+            # REDUCE BLOCKING: Discourage defensive actions
+            if (
+                action in blocking_actions and np.random.random() < 0.6
+            ):  # 60% chance to override
+                action = np.random.choice(attack_actions)  # Replace with attack
 
-            # 3. SMART MOVEMENT: Keep movement actions (they're tactical!)
-            elif action in movement_actions:
-                # Keep movement - it's important for positioning!
-                pass  # Don't change movement actions
-
-            # 4. HANDLE JUMPS: Reduce but don't eliminate (can be useful)
-            elif action == 0:  # Jump
-                if np.random.random() < 0.7:  # 70% chance to convert
-                    if np.random.random() < 0.5:
-                        action = np.random.choice(movement_actions)  # Move instead
-                    else:
-                        action = np.random.choice(close_range_attacks)  # Attack instead
-
-            # 5. OTHER ACTIONS: Convert to tactical choices
-            else:
-                if np.random.random() < 0.6:
-                    action = np.random.choice(movement_actions)  # Prefer movement
-                else:
-                    action = np.random.choice(close_range_attacks)  # Or close attack
-
-            # TACTICAL REWARD SYSTEM - Reward effectiveness, not just aggression
-            effectiveness_bonus = 0.0
-
-            # Movement bonus (positioning is important!)
-            if action in movement_actions:
-                effectiveness_bonus = 0.1  # Small bonus for good positioning
-
-            # Attack bonus (small base reward for attempting attacks)
-            elif action in attack_actions:
-                effectiveness_bonus = 0.05  # Small base bonus for attacks
+            # ENCOURAGE ATTACKING: Give BIG bonus for attack actions
+            attack_bonus = 0.3 if action in attack_actions else 0.0  # TRIPLED from 0.1!
 
             try:
                 obs, reward, done, truncated, _ = env.step(action)
 
-                # EFFECTIVENESS-BASED REWARDS - The wrapper handles the main logic
-                reward += effectiveness_bonus
+                # MASSIVE ATTACK BONUS to encourage aggressive play
+                reward += attack_bonus
 
-                # TACTICAL COMBO SYSTEM: Reward effective attack sequences
+                # AGGRESSION SCALING: Bigger bonus for consecutive attacks
                 if action in attack_actions:
-                    # Check if this attack actually connected (dealt damage)
-                    if hasattr(env, "_prev_opponent_health") and hasattr(
-                        env.unwrapped, "prev_opponent_health"
-                    ):
-                        # The wrapper will handle connection detection and big bonuses
-                        pass  # Let wrapper handle the heavy lifting
-
-                    # Basic combo tracking for any attacks
                     if hasattr(env, "_consecutive_attacks"):
                         env._consecutive_attacks += 1
                     else:
                         env._consecutive_attacks = 1
-
-                    # Small combo bonus (wrapper gives bigger bonuses for effective hits)
-                    combo_bonus = min(env._consecutive_attacks * 0.05, 0.2)  # Max +0.2
+                    # Combo bonus: More attacks in a row = bigger bonus
+                    combo_bonus = min(env._consecutive_attacks * 0.1, 0.5)  # Max +0.5
                     reward += combo_bonus
-
-                elif action in movement_actions:
-                    # Reset attack counter for movement (tactical repositioning)
-                    env._consecutive_attacks = 0
-
-                    # Small positioning bonus
-                    positioning_bonus = 0.1
-                    reward += positioning_bonus
-
                 else:
-                    # Reset counters for other actions
-                    env._consecutive_attacks = 0
+                    env._consecutive_attacks = 0  # Reset combo counter
 
                 # QUICK FINISH BONUS: Reward fast decisive victories
                 if done and not truncated and step_count < 1000:
@@ -637,7 +581,7 @@ def main():
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=100000,  # Reduced from 10000000 for testing
+        default=10000000,  # Reduced from 10000000 for testing
         help="Total timesteps to collect",
     )
     parser.add_argument(

@@ -10,7 +10,7 @@ from torch.optim import AdamW
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Memory-optimized wrapper for Samurai Showdown training with CLOSE-RANGE COMBAT FOCUS"""
+    """Memory-optimized wrapper for Samurai Showdown training"""
 
     _global_stats = {
         "total_wins": 0,
@@ -81,9 +81,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.action_space = self.env.action_space
             self._original_action_space = self.env.action_space
 
-        print(f"🚀 {self.env_id} CLOSE-RANGE COMBAT Wrapper")
-        print(f"   🥊 Focus: ULTRA-AGGRESSIVE close-range attacks")
-        print(f"   🎯 Rewards: +2 Win, -2 Loss, MASSIVE close-range bonuses")
+        print(f"🚀 {self.env_id} Memory-Optimized Wrapper")
+        print(f"   🎯 Rewards: +1 Win, -1 Loss, 0 everything else")
         print(f"   📏 Episode length: {max_episode_steps} steps")
 
     def _process_frame(self, rgb_frame):
@@ -132,12 +131,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         if time_since_last_log >= self.log_interval:
             global_stats = SamuraiShowdownCustomWrapper._global_stats
-            print(f"\n📊 CLOSE-RANGE COMBAT Training Stats:")
+            print(f"\n📊 Training Stats:")
 
             for env_id, stats in global_stats["env_stats"].items():
                 if stats["total_rounds"] > 0:
                     win_rate = stats["wins"] / stats["total_rounds"] * 100
-                    emoji = "🥊" if win_rate >= 60 else "⚔️" if win_rate >= 40 else "📈"
+                    emoji = "🏆" if win_rate >= 60 else "⚔️" if win_rate >= 40 else "📈"
                     print(
                         f"   {emoji} {env_id}: {stats['wins']}W/{stats['losses']}L ({win_rate:.1f}%)"
                     )
@@ -146,70 +145,36 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health, action=None):
-        """TACTICAL CLOSE-RANGE reward system - rewards smart positioning and effective attacks"""
+        """Ultra-aggressive reward system"""
         reward = 0.0
         done = False
 
-        # ACTION DEFINITIONS
-        close_range_attacks = [8, 9]  # Close punches/kicks - only effective when close
-        mid_range_attacks = [10, 11]  # Mid-range attacks
-        all_attacks = close_range_attacks + mid_range_attacks
-        defensive_actions = [4, 5, 6, 7]  # Blocking/defensive moves
-        movement_actions = [1, 2, 3]  # Movement to get close
-
-        # TACTICAL POSITIONING BONUS - reward moving toward opponent
-        positioning_bonus = 0.0
-        if action in movement_actions:
-            positioning_bonus = 0.2  # Good bonus for tactical movement
-
-        # SMART ATTACK BONUS - reward attacks that actually connect
+        # MASSIVE ATTACK BONUS
         attack_bonus = 0.0
-        if action in all_attacks:
-            # Base small bonus for attempting attacks
-            attack_bonus = 0.1
+        if action is not None:
+            attack_actions = [8, 9, 10, 11]  # Adjust based on your game
+            if action in attack_actions:
+                attack_bonus = 0.5  # HUGE bonus for attacking!
 
-        # DAMAGE EFFECTIVENESS BONUS - This is the key!
+            # PENALTY for defensive actions
+            defensive_actions = [4, 5, 6, 7]  # Blocking/defensive moves
+            if action in defensive_actions:
+                attack_bonus = -0.2  # Penalty for being defensive!
+
+        # MASSIVE damage rewards
         damage_reward = 0.0
-        connection_bonus = 0.0
         if hasattr(self, "prev_opponent_health"):
             if curr_opponent_health < self.prev_opponent_health:
                 damage_dealt = self.prev_opponent_health - curr_opponent_health
+                damage_reward = damage_dealt * 0.1  # 10x bigger than before!
+                # print(f"💥 DAMAGE DEALT: {damage_dealt} → +{damage_reward:.2f} reward!")
 
-                # MASSIVE BONUS for actually connecting attacks!
-                if action in close_range_attacks:
-                    # Close-range attack that ACTUALLY HIT = huge reward
-                    damage_reward = damage_dealt * 0.3  # Triple normal damage reward
-                    connection_bonus = 1.0  # HUGE bonus for successful close-range hit!
-                    # print(
-                    #     f"🎯 CLOSE-RANGE HIT! {damage_dealt} damage → +{damage_reward + connection_bonus:.2f}"
-                    # )
-                elif action in mid_range_attacks:
-                    # Mid-range attack that hit = good reward
-                    damage_reward = damage_dealt * 0.2
-                    connection_bonus = 0.5
-                    # print(
-                    #     f"🎯 MID-RANGE HIT! {damage_dealt} damage → +{damage_reward + connection_bonus:.2f}"
-                    # )
-                else:
-                    # Damage from other actions (less reward)
-                    damage_reward = damage_dealt * 0.1
-            else:
-                # PENALTY for attacking when no damage dealt (whiffed attacks)
-                if action in all_attacks:
-                    attack_bonus = -0.1  # Small penalty for missing attacks
-                    # print(f"💨 MISSED ATTACK! Action {action} → -{abs(attack_bonus):.2f}")
-
-        # PENALTY for taking damage (encourage better positioning)
+        # PENALTY for taking damage (encourage better attacking)
         damage_penalty = 0.0
         if hasattr(self, "prev_player_health"):
             if curr_player_health < self.prev_player_health:
                 damage_taken = self.prev_player_health - curr_player_health
-                damage_penalty = -damage_taken * 0.05
-
-        # DEFENSIVE PENALTY - discourage excessive blocking
-        defensive_penalty = 0.0
-        if action in defensive_actions:
-            defensive_penalty = -0.15  # Moderate penalty for defensive play
+                damage_penalty = -damage_taken * 0.05  # Penalty for taking damage
 
         # Check for round end
         if curr_player_health <= 0 or curr_opponent_health <= 0:
@@ -217,7 +182,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # WIN - BONUS with effectiveness emphasis
+                # WIN - HUGE BONUS
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_wins"] += 1
@@ -229,41 +194,23 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 ] = self.total_rounds
 
                 print(
-                    f"🎯 {self.env_id} TACTICAL VICTORY! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
 
                 # Base win reward
-                reward = 2.0
+                reward = 2.0  # DOUBLED from 1.0!
 
-                # DOMINANCE BONUS
+                # DOMINANCE BONUS: Extra reward for winning with high health
                 health_dominance = curr_player_health / self.full_hp
-                dominance_bonus = health_dominance * 1.0
+                dominance_bonus = health_dominance * 1.0  # Up to +1.0 for perfect wins
                 reward += dominance_bonus
-
-                # EFFECTIVE FINISH BONUS - extra reward if final blow connected
-                if (
-                    action in all_attacks
-                    and curr_opponent_health < self.prev_opponent_health
-                ):
-                    effective_finish_bonus = 1.5
-                    reward += effective_finish_bonus
-                    print(f"🎯 EFFECTIVE FINISH! +{effective_finish_bonus}")
 
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
-                return (
-                    reward
-                    + positioning_bonus
-                    + attack_bonus
-                    + damage_reward
-                    + connection_bonus
-                    + damage_penalty
-                    + defensive_penalty,
-                    True,
-                )
+                return reward + attack_bonus + damage_reward + damage_penalty, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                # LOSS
+                # LOSS - BIG PENALTY
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
@@ -277,19 +224,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
-                reward = -1.5
+                reward = -2.0  # DOUBLED penalty!
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
-                return (
-                    reward
-                    + positioning_bonus
-                    + attack_bonus
-                    + damage_reward
-                    + connection_bonus
-                    + damage_penalty
-                    + defensive_penalty,
-                    True,
-                )
+                return reward + attack_bonus + damage_reward + damage_penalty, True
 
             if self.reset_round:
                 done = True
@@ -298,15 +236,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
 
-        # Return continuous rewards - emphasizing EFFECTIVE combat
-        total_reward = (
-            positioning_bonus
-            + attack_bonus
-            + damage_reward
-            + connection_bonus
-            + damage_penalty
-            + defensive_penalty
-        )
+        # Return continuous rewards during gameplay
+        total_reward = attack_bonus + damage_reward + damage_penalty
         return total_reward, done
 
     def reset(self, **kwargs):
@@ -333,43 +264,23 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         stacked_obs = self._stack_observation()
         return stacked_obs, info
 
-    def _bias_action_toward_close_range(self, action):
-        """TACTICAL close-range action selection - smart positioning and timing"""
-        close_range_attacks = [8, 9]  # Close punches/kicks
-        mid_range_attacks = [10, 11]  # Mid-range attacks
-        all_attacks = close_range_attacks + mid_range_attacks
-        defensive_actions = [4, 5, 6, 7]  # Blocking/defensive
-        movement_actions = [1, 2, 3]  # Movement to get close
+    def _bias_action_toward_attacks(self, action):
+        """Force more aggressive action selection"""
+        attack_actions = [8, 9, 10, 11]
+        defensive_actions = [4, 5, 6, 7]
 
-        # SMART ATTACK STRATEGY:
-        # 1. If already attacking, allow the attack (don't override good decisions)
-        if action in all_attacks:
-            # 30% chance to convert mid-range to close-range (when appropriate)
-            if action in mid_range_attacks and np.random.random() < 0.3:
-                return np.random.choice(close_range_attacks)
-            return action  # Keep the attack action
+        # 60% chance to force attack instead of defense
+        if action in defensive_actions and np.random.random() < 0.6:
+            return np.random.choice(attack_actions)
 
-        # 2. Convert defensive actions to movement (get closer instead of blocking)
-        if action in defensive_actions:
-            # 70% chance to move closer instead of blocking
-            if np.random.random() < 0.7:
-                return np.random.choice(movement_actions)
-            else:
-                return np.random.choice(close_range_attacks)
+        # 30% chance to force attack for any non-attack action
+        if action not in attack_actions and np.random.random() < 0.3:
+            return np.random.choice(attack_actions)
 
-        # 3. For movement actions, keep them (good for positioning)
-        if action in movement_actions:
-            return action
-
-        # 4. For other actions (like jump), convert to tactical choice
-        # 50% movement to get close, 50% close-range attack
-        if np.random.random() < 0.5:
-            return np.random.choice(movement_actions)  # Move to get close
-        else:
-            return np.random.choice(close_range_attacks)  # Attack if close enough
+        return action
 
     def step(self, action):
-        """Step with CLOSE-RANGE COMBAT action handling"""
+        """Step with proper action handling"""
         # Convert action to proper format
         try:
             if hasattr(action, "shape") and action.shape == ():
@@ -383,8 +294,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError, TypeError):
             action_int = 0
 
-        # FORCE CLOSE-RANGE ATTACKS!
-        action_int = self._bias_action_toward_close_range(action_int)
+        action_int = self._bias_action_toward_attacks(action_int)
 
         # Convert for MultiBinary action space
         if hasattr(self._original_action_space, "n"):
@@ -424,7 +334,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         curr_player_health, curr_opponent_health = self._extract_health(info)
 
-        # PASS THE ACTION to reward calculation for close-range bonuses
+        # PASS THE ACTION to reward calculation
         custom_reward, custom_done = self._calculate_reward(
             curr_player_health, curr_opponent_health, action_int
         )
@@ -443,17 +353,25 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, custom_reward, done, truncated, info
 
 
-# Decision Transformer remains the same - no changes needed
+# decision transformer, nn.module to inherit
 class DecisionTransformer(nn.Module):
     """Decision Transformer for Samurai Showdown"""
 
     def __init__(
+        # self
         self,
+        # obs shape
         observation_shape,
+        # action dim
         action_dim,
+        # each hidden layer has 256 neurons
         hidden_size=256,
+        # 4 hidden layer
+        # each layer is multi head + forward
         n_layer=4,
+        # 4 head
         n_head=4,
+        # max ep len
         max_ep_len=2000,
     ):
         super().__init__()
@@ -464,7 +382,9 @@ class DecisionTransformer(nn.Module):
 
         # CNN encoder
         self.cnn_encoder = nn.Sequential(
+            # 9 frame with resize height and width; 32 fature map. 8x8 filter size; stride move 4 at a time
             nn.Conv2d(observation_shape[0], 32, kernel_size=8, stride=4, padding=2),
+            # move in place less mem
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
@@ -534,8 +454,12 @@ class DecisionTransformer(nn.Module):
         stacked_inputs = stacked_inputs.view(batch_size, 3 * seq_len, self.hidden_size)
 
         # Apply transformer
+
+        # rtg, state, action get normalized
         stacked_inputs = self.ln(stacked_inputs)
+        # rtg, state, action drop
         stacked_inputs = self.dropout(stacked_inputs)
+        # after all good. rtg, state, action go to transformer
         transformer_outputs = self.transformer(stacked_inputs)
 
         # Extract action predictions
@@ -660,9 +584,12 @@ def train_decision_transformer(
 
     dataset = TrajectoryDataset(trajectories, context_length)
 
-    # MEMORY FIX: Single worker, no persistence
+    # single worker
+    # data loader??
     dataloader = DataLoader(
+        # data set
         dataset,
+        # batch size
         batch_size=batch_size,
         shuffle=True,
         pin_memory=True,
@@ -676,7 +603,7 @@ def train_decision_transformer(
     model.to(device)
     model.train()
 
-    print(f"🚀 Training Decision Transformer for CLOSE-RANGE COMBAT:")
+    print(f"🚀 Training Decision Transformer:")
     print(f"   Device: {device}")
     print(f"   Epochs: {epochs}")
     print(f"   Batch size: {batch_size} (CAPPED)")
@@ -741,5 +668,5 @@ def train_decision_transformer(
                 cached = torch.cuda.memory_reserved() / 1024**3
                 print(f"   GPU: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
 
-    print(f"✅ CLOSE-RANGE COMBAT Training complete! Best loss: {best_loss:.4f}")
+    print(f"✅ Training complete! Best loss: {best_loss:.4f}")
     return model
