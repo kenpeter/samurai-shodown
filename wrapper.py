@@ -296,16 +296,24 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, custom_reward, done, truncated, info
 
 
+# decision transformer, nn.module to inherit
 class DecisionTransformer(nn.Module):
     """Decision Transformer for Samurai Showdown"""
 
     def __init__(
+        # self
         self,
+        # obs shape
         observation_shape,
+        # action dim
         action_dim,
+        # each hidden layer has 256 neurons
         hidden_size=256,
+        # 4 hidden layer
         n_layer=4,
+        # 4 head
         n_head=4,
+        # max ep len
         max_ep_len=2000,
     ):
         super().__init__()
