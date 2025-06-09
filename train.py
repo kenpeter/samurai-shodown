@@ -216,6 +216,7 @@ def model_based_action_selection(
         return None
 
 
+# how to collect traj with model
 def collect_trajectories_with_model(
     env,
     total_timesteps,
@@ -432,7 +433,11 @@ def collect_and_train_periodically(
         training_round += 1
 
         # Calculate progressive model usage probability
+
+        # progress
         progress = current_timesteps / total_timesteps
+        # model prob
+        # basically track how much random, how much use existing model
         model_probability = (
             base_model_probability
             + (max_model_probability - base_model_probability) * progress
@@ -444,6 +449,7 @@ def collect_and_train_periodically(
 
         # Collect trajectories with current model
         batch_trajectories = collect_trajectories_with_model(
+            # env, remain step, model, save dir, check interval, cuda, model prob, context len
             env,
             remaining_steps,
             model,
@@ -455,7 +461,10 @@ def collect_and_train_periodically(
         )
 
         # Add to overall collection
+
+        # overall all traj
         all_trajectories.extend(batch_trajectories)
+        # curr timestep
         current_timesteps += remaining_steps
 
         # Memory management
