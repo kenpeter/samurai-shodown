@@ -6,6 +6,7 @@ import torch
 import psutil
 import numpy as np
 import gc
+import collections
 
 import retro
 import gymnasium as gym
@@ -72,20 +73,91 @@ def save_checkpoint(model, timesteps, save_dir):
     print(f"💾 Checkpoint saved: {zip_path}")
 
 
-def collect_trajectories_memory_optimized(
-    env, total_timesteps, model, save_dir, checkpoint_interval=300000
+def model_based_action_selection(
+    model,
+    context_states,
+    context_actions,
+    context_rewards,
+    timestep,
+    device="cuda",
+    temperature=1.0,
 ):
-    """Collect trajectories with memory optimization"""
-    print(f"🎮 Collecting {total_timesteps:,} timesteps with MEMORY LIMITS...")
+    """Use the trained model to select actions"""
+    try:
+        model.eval()
+        with torch.no_grad():
+            # Convert to tensors
+            states_tensor = (
+                torch.from_numpy(np.array(context_states)).float().unsqueeze(0) / 255.0
+            )  # Normalize
+            actions_tensor = (
+                torch.from_numpy(np.array(context_actions)).long().unsqueeze(0)
+            )
+
+            # Calculate returns-to-go
+            returns = np.array(context_rewards)
+            returns_to_go = np.zeros_like(returns, dtype=np.float32)
+            running_return = 0
+            gamma = 0.99
+            for i in reversed(range(len(returns))):
+                running_return = returns[i] + gamma * running_return
+                returns_to_go[i] = running_return
+
+            rtg_tensor = torch.from_numpy(returns_to_go).float().unsqueeze(0)
+            timesteps_tensor = (
+                torch.from_numpy(np.arange(len(context_states))).long().unsqueeze(0)
+            )
+
+            # Move to device
+            states_tensor = states_tensor.to(device)
+            actions_tensor = actions_tensor.to(device)
+            rtg_tensor = rtg_tensor.to(device)
+            timesteps_tensor = timesteps_tensor.to(device)
+
+            # Get action from model
+            logits = model(states_tensor, actions_tensor, rtg_tensor, timesteps_tensor)
+            last_logits = logits[0, -1] / temperature
+
+            # Sample action
+            probs = torch.softmax(last_logits, dim=-1)
+            action = torch.multinomial(probs, 1).item()
+
+            return action
+
+    except Exception as e:
+        print(f"⚠️ Model action selection failed: {e}")
+        return None
+
+
+def collect_trajectories_with_model(
+    env,
+    total_timesteps,
+    model,
+    save_dir,
+    checkpoint_interval=300000,
+    device="cuda",
+    use_model_probability=0.8,
+    context_length=30,
+):
+    """Collect trajectories using trained model for action selection"""
+    print(f"🎮 Collecting {total_timesteps:,} timesteps with MODEL-BASED actions...")
+    print(
+        f"   Model usage: {use_model_probability*100:.0f}% model, {(1-use_model_probability)*100:.0f}% random"
+    )
 
     trajectories = []
     current_timesteps = 0
     episode_count = 0
     last_checkpoint = 0
+    model_actions = 0
+    random_actions = 0
 
     # MEMORY FIX: Reduced trajectory limits
-    MAX_TRAJECTORIES = 50  # Reduced from 100
-    KEEP_COUNT = 10  # Keep only 10 during cleanup
+    MAX_TRAJECTORIES = 50
+    KEEP_COUNT = 10
+
+    # Check if model is trainable (has been trained at least once)
+    model_is_trained = hasattr(model, "_is_trained") and model._is_trained
 
     while current_timesteps < total_timesteps:
         trajectory = {"states": [], "actions": [], "rewards": []}
@@ -96,32 +168,72 @@ def collect_trajectories_memory_optimized(
         truncated = False
         step_count = 0
 
+        # Context for model-based action selection
+        context_states = collections.deque(maxlen=context_length)
+        context_actions = collections.deque(maxlen=context_length)
+        context_rewards = collections.deque(maxlen=context_length)
+
         while (
             not done
             and not truncated
             and step_count < 5000
             and current_timesteps < total_timesteps
         ):
-            # SMART ACTION POLICY: Reduce excessive jumping
-            action = env.action_space.sample()
+            action = None
 
-            # Action 0 is often jump in fighting games - reduce its frequency
-            # Only jump 10% of the time instead of equal probability
-            if action == 0 and np.random.random() > 0.1:
-                # Pick a different action from 1 to max action
+            # Decide whether to use model or random action
+            use_model = (
+                model_is_trained
+                and len(context_states) >= min(10, context_length)  # Need some context
+                and np.random.random() < use_model_probability
+            )
+
+            if use_model:
+                # Use model for action selection
+                action = model_based_action_selection(
+                    model,
+                    list(context_states),
+                    list(context_actions),
+                    list(context_rewards),
+                    step_count,
+                    device=device,
+                    temperature=1.2,  # Slightly random for exploration
+                )
+
+                if action is not None:
+                    model_actions += 1
+                else:
+                    # Fallback to random if model fails
+                    action = env.action_space.sample()
+                    random_actions += 1
+            else:
+                # Random action (for exploration or when model not ready)
+                action = env.action_space.sample()
+                random_actions += 1
+
+            # Reduce excessive jumping (action 0 is often jump)
+            if action == 0 and np.random.random() > 0.15:
                 action = np.random.randint(1, env.action_space.n)
 
             try:
                 obs, reward, done, truncated, _ = env.step(action)
+
+                # Store in trajectory
                 trajectory["actions"].append(action)
                 trajectory["rewards"].append(reward)
                 current_timesteps += 1
                 step_count += 1
 
+                # Update context for next action selection
+                if len(context_states) > 0:  # Need at least one state
+                    context_actions.append(action)
+                    context_rewards.append(reward)
+
                 if not done and not truncated:
                     trajectory["states"].append(obs.copy())
+                    context_states.append(obs.copy())
 
-                # Save every 300,000 timesteps only
+                # Save checkpoint
                 if current_timesteps - last_checkpoint >= checkpoint_interval:
                     save_checkpoint(model, current_timesteps, save_dir)
                     last_checkpoint = current_timesteps
@@ -136,12 +248,12 @@ def collect_trajectories_memory_optimized(
 
         episode_count += 1
 
-        # MEMORY FIX: Keep only last 10 trajectories
+        # Memory management
         if len(trajectories) > MAX_TRAJECTORIES:
             trajectories = trajectories[-KEEP_COUNT:]
             print(f"🧹 Memory cleanup: keeping only {len(trajectories)} trajectories")
 
-        # Progress logging with memory monitoring
+        # Progress logging
         if current_timesteps > 0 and current_timesteps % 5000 == 0:
             recent_rewards = [sum(t["rewards"]) for t in trajectories[-20:]]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
@@ -156,10 +268,16 @@ def collect_trajectories_memory_optimized(
             memory_percent = memory_usage.percent
             memory_gb = memory_usage.used / (1024**3)
 
+            total_actions = model_actions + random_actions
+            model_usage = (
+                (model_actions / total_actions * 100) if total_actions > 0 else 0
+            )
+
             print(
                 f"   📊 {current_timesteps:,}/{total_timesteps:,} | "
                 f"Eps: {episode_count:,} | Traj: {len(trajectories)} | "
-                f"Win: {win_rate:.1f}% | RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
+                f"Win: {win_rate:.1f}% | Model: {model_usage:.1f}% | "
+                f"RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
             )
 
             # Emergency cleanup
@@ -168,39 +286,69 @@ def collect_trajectories_memory_optimized(
                 trajectories = trajectories[-5:]
                 gc.collect()
 
-    # Final checkpoint as .zip
+    # Final checkpoint
     save_checkpoint(model, current_timesteps, save_dir)
+
     print(
         f"✅ Collected {len(trajectories)} trajectories over {current_timesteps:,} timesteps"
     )
+    if model_actions + random_actions > 0:
+        final_model_usage = model_actions / (model_actions + random_actions) * 100
+        print(
+            f"📈 Final action distribution: {final_model_usage:.1f}% model, {100-final_model_usage:.1f}% random"
+        )
+
     return trajectories
 
 
 def collect_and_train_periodically(
     env, total_timesteps, model, save_dir, checkpoint_interval, args
 ):
-    """Collect trajectories and train periodically"""
-    print(f"🎮 Starting periodic collection and training...")
+    """Collect trajectories and train periodically with progressive model usage"""
+    print(
+        f"🎮 Starting periodic collection and training with PROGRESSIVE MODEL USAGE..."
+    )
 
     all_trajectories = []
     current_timesteps = 0
     training_round = 0
 
-    while current_timesteps < total_timesteps:
-        # Collect a batch of trajectories
-        remaining_steps = min(checkpoint_interval, total_timesteps - current_timesteps)
-        print(f"\n🔄 Training Round {training_round + 1}")
-        print(f"   Collecting {remaining_steps:,} timesteps...")
+    # Progressive model usage - start with more random, gradually use model more
+    base_model_probability = 0.3  # Start with 30% model usage
+    max_model_probability = 0.9  # End with 90% model usage
 
-        batch_trajectories = collect_trajectories_memory_optimized(
-            env, remaining_steps, model, save_dir, checkpoint_interval
+    while current_timesteps < total_timesteps:
+        remaining_steps = min(checkpoint_interval, total_timesteps - current_timesteps)
+        training_round += 1
+
+        # Calculate progressive model usage probability
+        progress = current_timesteps / total_timesteps
+        model_probability = (
+            base_model_probability
+            + (max_model_probability - base_model_probability) * progress
+        )
+
+        print(f"\n🔄 Training Round {training_round}")
+        print(f"   Collecting {remaining_steps:,} timesteps...")
+        print(f"   Model usage: {model_probability*100:.1f}% (progressive)")
+
+        # Collect trajectories with current model
+        batch_trajectories = collect_trajectories_with_model(
+            env,
+            remaining_steps,
+            model,
+            save_dir,
+            checkpoint_interval,
+            device="cuda",
+            use_model_probability=model_probability,
+            context_length=args.context_length,
         )
 
         # Add to overall collection
         all_trajectories.extend(batch_trajectories)
         current_timesteps += remaining_steps
 
-        # Memory management - keep only recent trajectories
+        # Memory management
         MAX_TOTAL_TRAJECTORIES = 100
         if len(all_trajectories) > MAX_TOTAL_TRAJECTORIES:
             all_trajectories = all_trajectories[-MAX_TOTAL_TRAJECTORIES:]
@@ -235,13 +383,17 @@ def collect_and_train_periodically(
                 context_length=args.context_length,
             )
 
+            # Mark model as trained
+            model._is_trained = True
+
             # Save intermediate model
-            training_round += 1
             save_checkpoint(model, current_timesteps, save_dir)
 
             # Clear CUDA cache
             torch.cuda.empty_cache()
             gc.collect()
+
+            print(f"✅ Round {training_round} complete - model improved!")
         else:
             print("⚠️ Not enough good trajectories for training yet")
 
@@ -250,7 +402,7 @@ def collect_and_train_periodically(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Samurai Showdown Agent - Single Process Memory Optimized"
+        description="Train Samurai Showdown Agent - Progressive Model-Based Collection"
     )
     parser.add_argument(
         "--total-timesteps",
@@ -281,7 +433,7 @@ def main():
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=100000,  # Reduced for more frequent training
+        default=100000,  # Checkpoint every 100k steps
         help="Save checkpoint every N timesteps",
     )
 
@@ -340,30 +492,23 @@ def main():
     obs_shape = get_actual_observation_dims(game, state)
     print(f"✅ Observation shape: {obs_shape}")
 
-    # MAXIMUM BATCH SIZE: Use accurate model memory calculation
+    # Calculate batch size
     if args.batch_size == 0:
-        # Simple calculation for batch size
         context_length = args.context_length
         obs_memory_per_sample = (
             context_length * obs_shape[0] * obs_shape[1] * obs_shape[2] * 4
         )
-
-        # Accurate breakdown:
-        # Model (7.23M params) + gradients + optimizer + activations + CUDA overhead = ~1.6GB
-        # Available for batches from 12GB VRAM: 10.4GB
         available_memory = 10.4 * 1024 * 1024 * 1024  # 10.4GB
         max_batch_size = int(available_memory / obs_memory_per_sample)
-
-        # MAXIMUM: Cap at 256 (true maximum) and ensure minimum of 8
         args.batch_size = min(256, max(8, max_batch_size))
 
-    print(f"🚀 Using MAXIMUM batch size: {args.batch_size} (16x faster than before!)")
+    print(f"🚀 Using batch size: {args.batch_size}")
 
     # Setup directories
     save_dir = "trained_models"
     os.makedirs(save_dir, exist_ok=True)
 
-    # Create single training environment
+    # Create training environment
     print(f"🏗️ Creating training environment...")
     env = retro.make(
         game=game,
@@ -416,7 +561,6 @@ def main():
         print(f"📂 Loading model from: {args.resume}")
 
         if args.resume.endswith(".zip"):
-            # Extract and load from .zip
             import zipfile
             import tempfile
 
@@ -426,7 +570,6 @@ def main():
                     print(f"❌ No .pth file found in zip")
                     return
 
-                # Extract to temp file and load
                 with tempfile.NamedTemporaryFile(
                     suffix=".pth", delete=False
                 ) as temp_file:
@@ -435,6 +578,7 @@ def main():
 
             try:
                 model.load_state_dict(torch.load(temp_path, map_location=device))
+                model._is_trained = True  # Mark as trained
                 print(f"✅ Model loaded from .zip")
             except Exception as e:
                 print(f"❌ Error loading: {e}")
@@ -442,9 +586,9 @@ def main():
             finally:
                 os.unlink(temp_path)
         else:
-            # Direct .pth loading
             try:
                 model.load_state_dict(torch.load(args.resume, map_location=device))
+                model._is_trained = True  # Mark as trained
                 print(f"✅ Model loaded")
             except Exception as e:
                 print(f"❌ Error loading: {e}")
@@ -453,19 +597,22 @@ def main():
     param_count = sum(p.numel() for p in model.parameters())
     print(f"✅ Model created with {param_count:,} parameters")
 
-    # Start periodic training process
-    print(
-        f"📊 Starting periodic training every {args.checkpoint_interval:,} timesteps..."
-    )
+    # Move model to GPU
+    model.to(device)
 
-    # Use the corrected function call
+    # Start periodic training process with progressive model usage
+    print(
+        f"📊 Starting PROGRESSIVE training every {args.checkpoint_interval:,} timesteps..."
+    )
+    print(f"🎯 Model usage will increase from 30% to 90% over training")
+
     trajectories, trained_model = collect_and_train_periodically(
         env, args.total_timesteps, model, save_dir, args.checkpoint_interval, args
     )
 
     print(f"✅ Collected {len(trajectories)} total trajectories")
 
-    # Final training with all collected data
+    # Final comprehensive training
     good_trajectories = [
         t for t in trajectories if len(t["rewards"]) > 10 and sum(t["rewards"]) != 0
     ]
@@ -476,7 +623,6 @@ def main():
         good_trajectories = trajectories
 
     if len(good_trajectories) >= 2:
-        # Final comprehensive training
         print(f"🏋️ Final comprehensive training...")
         trained_model = train_decision_transformer(
             model=trained_model,
@@ -488,7 +634,7 @@ def main():
             context_length=args.context_length,
         )
 
-    # Save final model as .zip
+    # Save final model
     import zipfile
 
     temp_model_path = "temp_final_model.pth"
