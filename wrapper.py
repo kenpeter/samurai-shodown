@@ -144,10 +144,31 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             print()
             global_stats["last_log_time"] = current_time
 
-    def _calculate_reward(self, curr_player_health, curr_opponent_health):
-        """Simple win/loss rewards"""
+    def _calculate_reward(self, curr_player_health, curr_opponent_health, action=None):
+        """Simple win/loss rewards with attack bonus"""
         reward = 0.0
         done = False
+
+        # ATTACK BONUS: Encourage aggressive play
+        attack_bonus = 0.0
+        if action is not None:
+            # Common attack actions in fighting games
+            attack_actions = [
+                8,
+                9,
+                10,
+                11,
+            ]  # Adjust based on your game's action mapping
+            if action in attack_actions:
+                attack_bonus = 0.1  # Small bonus for attacking
+
+        # Health-based rewards (optional - more granular feedback)
+        health_reward = 0.0
+        if hasattr(self, "prev_opponent_health"):
+            if curr_opponent_health < self.prev_opponent_health:
+                # Dealt damage to opponent
+                damage_dealt = self.prev_opponent_health - curr_opponent_health
+                health_reward += damage_dealt * 0.01  # Small reward for damage
 
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
@@ -171,7 +192,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 reward = 1.0
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
-                return reward, True
+                return reward + attack_bonus + health_reward, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
                 # LOSS
@@ -191,7 +212,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 reward = -1.0
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
-                return reward, True
+                return reward + attack_bonus + health_reward, True
 
             if self.reset_round:
                 done = True
@@ -200,7 +221,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
-        return 0.0, done
+        return (
+            attack_bonus + health_reward,
+            done,
+        )  # Return small rewards during gameplay
 
     def reset(self, **kwargs):
         """Reset environment"""
@@ -278,8 +302,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 truncated = False
 
         curr_player_health, curr_opponent_health = self._extract_health(info)
+
+        # PASS THE ACTION to reward calculation
         custom_reward, custom_done = self._calculate_reward(
-            curr_player_health, curr_opponent_health
+            curr_player_health, curr_opponent_health, action_int
         )
 
         if custom_done:

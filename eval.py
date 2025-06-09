@@ -183,7 +183,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models/decision_transformer_samurai_final.zip",
+        default="trained_models/model_500000_steps.zip",
         help="Path to the trained Decision Transformer model (.zip file)",
     )
     parser.add_argument(

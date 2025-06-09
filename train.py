@@ -216,7 +216,6 @@ def model_based_action_selection(
         return None
 
 
-# how to collect traj with model
 def collect_trajectories_with_model(
     env,
     total_timesteps,
@@ -243,6 +242,7 @@ def collect_trajectories_with_model(
     # MEMORY FIX: Reduced trajectory limits
     MAX_TRAJECTORIES = 50
     KEEP_COUNT = 10
+    MAX_EPISODE_STEPS = 3000
 
     # Check if model is trainable (has been trained at least once)
     model_is_trained = hasattr(model, "_is_trained") and model._is_trained
@@ -267,7 +267,7 @@ def collect_trajectories_with_model(
         while (
             not done
             and not truncated
-            and step_count < 5000
+            and step_count < MAX_EPISODE_STEPS  # Use the variable
             and current_timesteps < total_timesteps
         ):
             action = None
@@ -327,8 +327,15 @@ def collect_trajectories_with_model(
             if action == 0 and np.random.random() > 0.15:
                 action = np.random.randint(1, env.action_space.n)
 
+            # ENCOURAGE ATTACKING: Give small bonus for attack actions
+            attack_actions = [8, 9, 10, 11]  # Common attack button mappings
+            attack_bonus = 0.1 if action in attack_actions else 0.0
+
             try:
                 obs, reward, done, truncated, _ = env.step(action)
+
+                # ADD ATTACK BONUS to encourage aggressive play
+                reward += attack_bonus
 
                 # Store in trajectory
                 trajectory["actions"].append(action)
@@ -359,10 +366,18 @@ def collect_trajectories_with_model(
 
         episode_count += 1
 
-        # Memory management
+        # Memory management - MUCH more aggressive
         if len(trajectories) > MAX_TRAJECTORIES:
             trajectories = trajectories[-KEEP_COUNT:]
             print(f"🧹 Memory cleanup: keeping only {len(trajectories)} trajectories")
+
+        # EMERGENCY: Force cleanup every 20 episodes regardless
+        if episode_count % 20 == 0 and len(trajectories) > 5:
+            trajectories = trajectories[-3:]
+            gc.collect()  # Force garbage collection
+            print(
+                f"🚨 EMERGENCY cleanup: keeping only {len(trajectories)} trajectories"
+            )
 
         # Progress logging
         if current_timesteps > 0 and current_timesteps % 5000 == 0:
@@ -433,11 +448,7 @@ def collect_and_train_periodically(
         training_round += 1
 
         # Calculate progressive model usage probability
-
-        # progress
         progress = current_timesteps / total_timesteps
-        # model prob
-        # basically track how much random, how much use existing model
         model_probability = (
             base_model_probability
             + (max_model_probability - base_model_probability) * progress
@@ -449,7 +460,6 @@ def collect_and_train_periodically(
 
         # Collect trajectories with current model
         batch_trajectories = collect_trajectories_with_model(
-            # env, remain step, model, save dir, check interval, cuda, model prob, context len
             env,
             remaining_steps,
             model,
@@ -461,19 +471,23 @@ def collect_and_train_periodically(
         )
 
         # Add to overall collection
-
-        # overall all traj
         all_trajectories.extend(batch_trajectories)
-        # curr timestep
         current_timesteps += remaining_steps
 
-        # Memory management
-        MAX_TOTAL_TRAJECTORIES = 100
+        # Memory management - EMERGENCY LIMITS
+        MAX_TOTAL_TRAJECTORIES = 20  # Reduced from 100 to 20
         if len(all_trajectories) > MAX_TOTAL_TRAJECTORIES:
             all_trajectories = all_trajectories[-MAX_TOTAL_TRAJECTORIES:]
             print(
                 f"🧹 Total trajectory cleanup: keeping {len(all_trajectories)} trajectories"
             )
+
+        # FORCE aggressive cleanup after each round
+        if len(all_trajectories) > 10:
+            all_trajectories = all_trajectories[-10:]
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"🚨 FORCED cleanup: keeping {len(all_trajectories)} trajectories")
 
         # Filter good trajectories for training
         good_trajectories = [
@@ -526,7 +540,7 @@ def main():
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=10000000,  # Reduced default for testing
+        default=10000000,  # Reduced from 500000 for memory safety
         help="Total timesteps to collect",
     )
     parser.add_argument(
@@ -552,7 +566,7 @@ def main():
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=100000,  # Checkpoint every 100k steps
+        default=50000,  # Reduced from 100000 for more frequent checkpoints
         help="Save checkpoint every N timesteps",
     )
 
