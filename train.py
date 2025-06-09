@@ -232,6 +232,10 @@ def collect_trajectories_with_model(
         f"   Model usage: {use_model_probability*100:.0f}% model, {(1-use_model_probability)*100:.0f}% random"
     )
 
+    # Define action sets at the beginning - THIS FIXES THE BUG!
+    attack_actions = [8, 9, 10, 11]  # Common attack button mappings
+    blocking_actions = [4, 5, 6, 7]  # Common blocking/defensive actions
+
     trajectories = []
     current_timesteps = 0
     episode_count = 0
@@ -242,7 +246,7 @@ def collect_trajectories_with_model(
     # MEMORY FIX: Reduced trajectory limits
     MAX_TRAJECTORIES = 50
     KEEP_COUNT = 10
-    MAX_EPISODE_STEPS = 3000
+    MAX_EPISODE_STEPS = 5000
 
     # Check if model is trainable (has been trained at least once)
     model_is_trained = hasattr(model, "_is_trained") and model._is_trained
@@ -267,7 +271,7 @@ def collect_trajectories_with_model(
         while (
             not done
             and not truncated
-            and step_count < MAX_EPISODE_STEPS  # Use the variable
+            and step_count < MAX_EPISODE_STEPS
             and current_timesteps < total_timesteps
         ):
             action = None
@@ -323,19 +327,48 @@ def collect_trajectories_with_model(
                 action = env.action_space.sample()
                 random_actions += 1
 
-            # Reduce excessive jumping (action 0 is often jump)
-            if action == 0 and np.random.random() > 0.15:
-                action = np.random.randint(1, env.action_space.n)
+            # FORCE AGGRESSION: Bias action selection toward attacks
+            if np.random.random() < 0.4:  # 40% chance to force attack
+                action = np.random.choice(attack_actions)
 
-            # ENCOURAGE ATTACKING: Give small bonus for attack actions
-            attack_actions = [8, 9, 10, 11]  # Common attack button mappings
-            attack_bonus = 0.1 if action in attack_actions else 0.0
+            # Reduce excessive jumping (action 0 is often jump)
+            if action == 0 and np.random.random() > 0.1:  # Reduced tolerance
+                action = np.random.choice(attack_actions)  # Force attack instead
+
+            # REDUCE BLOCKING: Discourage defensive actions
+            if (
+                action in blocking_actions and np.random.random() < 0.6
+            ):  # 60% chance to override
+                action = np.random.choice(attack_actions)  # Replace with attack
+
+            # ENCOURAGE ATTACKING: Give BIG bonus for attack actions
+            attack_bonus = 0.3 if action in attack_actions else 0.0  # TRIPLED from 0.1!
 
             try:
                 obs, reward, done, truncated, _ = env.step(action)
 
-                # ADD ATTACK BONUS to encourage aggressive play
+                # MASSIVE ATTACK BONUS to encourage aggressive play
                 reward += attack_bonus
+
+                # AGGRESSION SCALING: Bigger bonus for consecutive attacks
+                if action in attack_actions:
+                    if hasattr(env, "_consecutive_attacks"):
+                        env._consecutive_attacks += 1
+                    else:
+                        env._consecutive_attacks = 1
+                    # Combo bonus: More attacks in a row = bigger bonus
+                    combo_bonus = min(env._consecutive_attacks * 0.1, 0.5)  # Max +0.5
+                    reward += combo_bonus
+                else:
+                    env._consecutive_attacks = 0  # Reset combo counter
+
+                # QUICK FINISH BONUS: Reward fast decisive victories
+                if done and not truncated and step_count < 1000:
+                    quick_finish_bonus = 1.0 - (step_count / 1000)  # Up to +1.0 bonus
+                    reward += quick_finish_bonus
+                    print(
+                        f"🚀 QUICK FINISH BONUS: +{quick_finish_bonus:.2f} for {step_count} step victory!"
+                    )
 
                 # Store in trajectory
                 trajectory["actions"].append(action)
@@ -355,6 +388,14 @@ def collect_trajectories_with_model(
                 if current_timesteps - last_checkpoint >= checkpoint_interval:
                     save_checkpoint(model, current_timesteps, save_dir)
                     last_checkpoint = current_timesteps
+
+                # FORCE episode termination if too long
+                if step_count >= MAX_EPISODE_STEPS:
+                    print(
+                        f"⏰ Episode {episode_count} forced to end after {step_count} steps"
+                    )
+                    truncated = True
+                    break
 
             except Exception as e:
                 print(f"⚠️ Step error in episode {episode_count}: {e}")
@@ -439,9 +480,9 @@ def collect_and_train_periodically(
     current_timesteps = 0
     training_round = 0
 
-    # Progressive model usage - start with more random, gradually use model more
-    base_model_probability = 0.3  # Start with 30% model usage
-    max_model_probability = 0.9  # End with 90% model usage
+    # AGGRESSIVE model usage - start high, stay high
+    base_model_probability = 0.5  # Start with 50% instead of 20%
+    max_model_probability = 0.95  # End with 95%
 
     while current_timesteps < total_timesteps:
         remaining_steps = min(checkpoint_interval, total_timesteps - current_timesteps)
@@ -540,7 +581,7 @@ def main():
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=10000000,  # Reduced from 500000 for memory safety
+        default=10000000,  # Reduced from 10000000 for testing
         help="Total timesteps to collect",
     )
     parser.add_argument(
@@ -737,7 +778,7 @@ def main():
     print(
         f"📊 Starting PROGRESSIVE training every {args.checkpoint_interval:,} timesteps..."
     )
-    print(f"🎯 Model usage will increase from 30% to 90% over training")
+    print(f"🎯 Model usage will increase from 50% to 95% over training")
 
     trajectories, trained_model = collect_and_train_periodically(
         env, args.total_timesteps, model, save_dir, args.checkpoint_interval, args

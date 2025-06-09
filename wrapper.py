@@ -145,37 +145,44 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health, action=None):
-        """Simple win/loss rewards with attack bonus"""
+        """Ultra-aggressive reward system"""
         reward = 0.0
         done = False
 
-        # ATTACK BONUS: Encourage aggressive play
+        # MASSIVE ATTACK BONUS
         attack_bonus = 0.0
         if action is not None:
-            # Common attack actions in fighting games
-            attack_actions = [
-                8,
-                9,
-                10,
-                11,
-            ]  # Adjust based on your game's action mapping
+            attack_actions = [8, 9, 10, 11]  # Adjust based on your game
             if action in attack_actions:
-                attack_bonus = 0.1  # Small bonus for attacking
+                attack_bonus = 0.5  # HUGE bonus for attacking!
 
-        # Health-based rewards (optional - more granular feedback)
-        health_reward = 0.0
+            # PENALTY for defensive actions
+            defensive_actions = [4, 5, 6, 7]  # Blocking/defensive moves
+            if action in defensive_actions:
+                attack_bonus = -0.2  # Penalty for being defensive!
+
+        # MASSIVE damage rewards
+        damage_reward = 0.0
         if hasattr(self, "prev_opponent_health"):
             if curr_opponent_health < self.prev_opponent_health:
-                # Dealt damage to opponent
                 damage_dealt = self.prev_opponent_health - curr_opponent_health
-                health_reward += damage_dealt * 0.01  # Small reward for damage
+                damage_reward = damage_dealt * 0.1  # 10x bigger than before!
+                # print(f"💥 DAMAGE DEALT: {damage_dealt} → +{damage_reward:.2f} reward!")
 
+        # PENALTY for taking damage (encourage better attacking)
+        damage_penalty = 0.0
+        if hasattr(self, "prev_player_health"):
+            if curr_player_health < self.prev_player_health:
+                damage_taken = self.prev_player_health - curr_player_health
+                damage_penalty = -damage_taken * 0.05  # Penalty for taking damage
+
+        # Check for round end
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # WIN
+                # WIN - HUGE BONUS
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_wins"] += 1
@@ -189,13 +196,21 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
-                reward = 1.0
+
+                # Base win reward
+                reward = 2.0  # DOUBLED from 1.0!
+
+                # DOMINANCE BONUS: Extra reward for winning with high health
+                health_dominance = curr_player_health / self.full_hp
+                dominance_bonus = health_dominance * 1.0  # Up to +1.0 for perfect wins
+                reward += dominance_bonus
+
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
-                return reward + attack_bonus + health_reward, True
+                return reward + attack_bonus + damage_reward + damage_penalty, True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                # LOSS
+                # LOSS - BIG PENALTY
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
@@ -209,22 +224,21 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(
                     f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
                 )
-                reward = -1.0
+                reward = -2.0  # DOUBLED penalty!
                 self.prev_player_health = curr_player_health
                 self.prev_opponent_health = curr_opponent_health
-                return reward + attack_bonus + health_reward, True
+                return reward + attack_bonus + damage_reward + damage_penalty, True
 
             if self.reset_round:
                 done = True
-
             self._log_periodic_stats()
 
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
-        return (
-            attack_bonus + health_reward,
-            done,
-        )  # Return small rewards during gameplay
+
+        # Return continuous rewards during gameplay
+        total_reward = attack_bonus + damage_reward + damage_penalty
+        return total_reward, done
 
     def reset(self, **kwargs):
         """Reset environment"""
@@ -250,6 +264,21 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         stacked_obs = self._stack_observation()
         return stacked_obs, info
 
+    def _bias_action_toward_attacks(self, action):
+        """Force more aggressive action selection"""
+        attack_actions = [8, 9, 10, 11]
+        defensive_actions = [4, 5, 6, 7]
+
+        # 60% chance to force attack instead of defense
+        if action in defensive_actions and np.random.random() < 0.6:
+            return np.random.choice(attack_actions)
+
+        # 30% chance to force attack for any non-attack action
+        if action not in attack_actions and np.random.random() < 0.3:
+            return np.random.choice(attack_actions)
+
+        return action
+
     def step(self, action):
         """Step with proper action handling"""
         # Convert action to proper format
@@ -264,6 +293,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 action_int = int(action)
         except (ValueError, IndexError, TypeError):
             action_int = 0
+
+        action_int = self._bias_action_toward_attacks(action_int)
 
         # Convert for MultiBinary action space
         if hasattr(self._original_action_space, "n"):
@@ -553,9 +584,12 @@ def train_decision_transformer(
 
     dataset = TrajectoryDataset(trajectories, context_length)
 
-    # MEMORY FIX: Single worker, no persistence
+    # single worker
+    # data loader??
     dataloader = DataLoader(
+        # data set
         dataset,
+        # batch size
         batch_size=batch_size,
         shuffle=True,
         pin_memory=True,
