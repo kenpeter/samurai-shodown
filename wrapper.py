@@ -310,6 +310,7 @@ class DecisionTransformer(nn.Module):
         # each hidden layer has 256 neurons
         hidden_size=256,
         # 4 hidden layer
+        # each layer is multi head + forward
         n_layer=4,
         # 4 head
         n_head=4,
@@ -396,8 +397,12 @@ class DecisionTransformer(nn.Module):
         stacked_inputs = stacked_inputs.view(batch_size, 3 * seq_len, self.hidden_size)
 
         # Apply transformer
+
+        # rtg, state, action get normalized
         stacked_inputs = self.ln(stacked_inputs)
+        # rtg, state, action drop
         stacked_inputs = self.dropout(stacked_inputs)
+        # after all good. rtg, state, action go to transformer
         transformer_outputs = self.transformer(stacked_inputs)
 
         # Extract action predictions

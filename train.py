@@ -176,6 +176,78 @@ def collect_trajectories_memory_optimized(
     return trajectories
 
 
+def collect_and_train_periodically(
+    env, total_timesteps, model, save_dir, checkpoint_interval, args
+):
+    """Collect trajectories and train periodically"""
+    print(f"🎮 Starting periodic collection and training...")
+
+    all_trajectories = []
+    current_timesteps = 0
+    training_round = 0
+
+    while current_timesteps < total_timesteps:
+        # Collect a batch of trajectories
+        remaining_steps = min(checkpoint_interval, total_timesteps - current_timesteps)
+        print(f"\n🔄 Training Round {training_round + 1}")
+        print(f"   Collecting {remaining_steps:,} timesteps...")
+
+        batch_trajectories = collect_trajectories_memory_optimized(
+            env, remaining_steps, model, save_dir, checkpoint_interval
+        )
+
+        # Add to overall collection
+        all_trajectories.extend(batch_trajectories)
+        current_timesteps += remaining_steps
+
+        # Memory management - keep only recent trajectories
+        MAX_TOTAL_TRAJECTORIES = 100
+        if len(all_trajectories) > MAX_TOTAL_TRAJECTORIES:
+            all_trajectories = all_trajectories[-MAX_TOTAL_TRAJECTORIES:]
+            print(
+                f"🧹 Total trajectory cleanup: keeping {len(all_trajectories)} trajectories"
+            )
+
+        # Filter good trajectories for training
+        good_trajectories = [
+            t
+            for t in all_trajectories
+            if len(t["rewards"]) > 10 and sum(t["rewards"]) != 0
+        ]
+
+        if len(good_trajectories) < 5:
+            print("⚠️ Using all trajectories due to limited good data")
+            good_trajectories = all_trajectories
+
+        if len(good_trajectories) >= 2:
+            print(
+                f"🏋️ Training Decision Transformer with {len(good_trajectories)} trajectories..."
+            )
+
+            # Train the model
+            model = train_decision_transformer(
+                model=model,
+                trajectories=good_trajectories,
+                epochs=min(args.n_steps, 20),  # Limit epochs per training round
+                batch_size=args.batch_size,
+                lr=args.learning_rate,
+                device="cuda",
+                context_length=args.context_length,
+            )
+
+            # Save intermediate model
+            training_round += 1
+            save_checkpoint(model, current_timesteps, save_dir)
+
+            # Clear CUDA cache
+            torch.cuda.empty_cache()
+            gc.collect()
+        else:
+            print("⚠️ Not enough good trajectories for training yet")
+
+    return all_trajectories, model
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Train Samurai Showdown Agent - Single Process Memory Optimized"
@@ -183,7 +255,7 @@ def main():
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=1000000,
+        default=10000000,  # Reduced default for testing
         help="Total timesteps to collect",
     )
     parser.add_argument(
@@ -209,7 +281,7 @@ def main():
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=300000,
+        default=100000,  # Reduced for more frequent training
         help="Save checkpoint every N timesteps",
     )
 
@@ -381,15 +453,19 @@ def main():
     param_count = sum(p.numel() for p in model.parameters())
     print(f"✅ Model created with {param_count:,} parameters")
 
-    # Collect trajectories
-    print(f"📊 Starting trajectory collection...")
-    trajectories = collect_trajectories_memory_optimized(
-        env, args.total_timesteps, model, save_dir, args.checkpoint_interval
+    # Start periodic training process
+    print(
+        f"📊 Starting periodic training every {args.checkpoint_interval:,} timesteps..."
     )
 
-    print(f"✅ Collected {len(trajectories)} trajectories")
+    # Use the corrected function call
+    trajectories, trained_model = collect_and_train_periodically(
+        env, args.total_timesteps, model, save_dir, args.checkpoint_interval, args
+    )
 
-    # Filter good trajectories
+    print(f"✅ Collected {len(trajectories)} total trajectories")
+
+    # Final training with all collected data
     good_trajectories = [
         t for t in trajectories if len(t["rewards"]) > 10 and sum(t["rewards"]) != 0
     ]
@@ -399,26 +475,18 @@ def main():
         print("⚠️ Using all trajectories due to limited good data")
         good_trajectories = trajectories
 
-    if len(good_trajectories) < 2:
-        print("❌ Not enough trajectories for training")
-        return
-
-    # Train Decision Transformer
-    print(f"🏋️ Training Decision Transformer...")
-    print(f"   Epochs: {args.n_steps}")
-    print(f"   Batch size: {args.batch_size}")
-    print(f"   Learning rate: {args.learning_rate}")
-    print(f"   Context length: {args.context_length}")
-
-    trained_model = train_decision_transformer(
-        model=model,
-        trajectories=good_trajectories,
-        epochs=args.n_steps,
-        batch_size=args.batch_size,
-        lr=args.learning_rate,
-        device=device,
-        context_length=args.context_length,
-    )
+    if len(good_trajectories) >= 2:
+        # Final comprehensive training
+        print(f"🏋️ Final comprehensive training...")
+        trained_model = train_decision_transformer(
+            model=trained_model,
+            trajectories=good_trajectories,
+            epochs=args.n_steps,
+            batch_size=args.batch_size,
+            lr=args.learning_rate,
+            device=device,
+            context_length=args.context_length,
+        )
 
     # Save final model as .zip
     import zipfile
