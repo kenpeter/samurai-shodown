@@ -102,7 +102,14 @@ def collect_trajectories_memory_optimized(
             and step_count < 5000
             and current_timesteps < total_timesteps
         ):
+            # SMART ACTION POLICY: Reduce excessive jumping
             action = env.action_space.sample()
+
+            # Action 0 is often jump in fighting games - reduce its frequency
+            # Only jump 10% of the time instead of equal probability
+            if action == 0 and np.random.random() > 0.1:
+                # Pick a different action from 1 to max action
+                action = np.random.randint(1, env.action_space.n)
 
             try:
                 obs, reward, done, truncated, _ = env.step(action)
