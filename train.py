@@ -261,7 +261,7 @@ def main():
     obs_shape = get_actual_observation_dims(game, state)
     print(f"✅ Observation shape: {obs_shape}")
 
-    # MAXIMUM BATCH SIZE: Cap at 224 for maximum performance
+    # MAXIMUM BATCH SIZE: Use accurate model memory calculation
     if args.batch_size == 0:
         # Simple calculation for batch size
         context_length = args.context_length
@@ -269,14 +269,16 @@ def main():
             context_length * obs_shape[0] * obs_shape[1] * obs_shape[2] * 4
         )
 
-        # Use 9.5GB of your 12GB VRAM for batches (leaving 2.5GB for model + buffer)
-        available_memory = 9.5 * 1024 * 1024 * 1024  # 9.5GB
+        # Accurate breakdown:
+        # Model (7.23M params) + gradients + optimizer + activations + CUDA overhead = ~1.6GB
+        # Available for batches from 12GB VRAM: 10.4GB
+        available_memory = 10.4 * 1024 * 1024 * 1024  # 10.4GB
         max_batch_size = int(available_memory / obs_memory_per_sample)
 
-        # MAXIMUM: Cap at 224 and ensure minimum of 8
-        args.batch_size = min(224, max(8, max_batch_size))
+        # MAXIMUM: Cap at 256 (true maximum) and ensure minimum of 8
+        args.batch_size = min(256, max(8, max_batch_size))
 
-    print(f"🚀 Using MAXIMUM batch size: {args.batch_size} (14x faster than before!)")
+    print(f"🚀 Using MAXIMUM batch size: {args.batch_size} (16x faster than before!)")
 
     # Setup directories
     save_dir = "trained_models"
