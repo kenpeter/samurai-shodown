@@ -4,7 +4,7 @@
 
 
 
-python train.py --resume trained_models/model_1000000_steps.zip --render --total-timesteps 10000000  --learning-rate 3e-3
+python train.py --resume trained_models/model_2400000_steps.zip --render --total-timesteps 10000000  --learning-rate 1e-3
 
 
 
