@@ -5,142 +5,39 @@ import time
 import torch
 import psutil
 import numpy as np
+import gc
 
 import retro
 import gymnasium as gym
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.vec_env import SubprocVecEnv
 
 # Import the wrapper (now includes Decision Transformer)
 from wrapper import (
     SamuraiShowdownCustomWrapper,
     DecisionTransformer,
-    collect_trajectories,
     train_decision_transformer,
 )
 
 
-def make_env_for_subprocess(game, state, rendering=False, seed=0, env_id=0):
-    """Create environment function for SubprocVecEnv - all imports MUST be inside"""
-
-    def _init():
-        # Import everything inside the function for subprocess compatibility
-        import retro
-        import gymnasium as gym
-        from stable_baselines3.common.monitor import Monitor
-        from wrapper import SamuraiShowdownCustomWrapper
-
-        # Create environment - FIXED FOR STABLE-RETRO
-        env = retro.make(
-            game=game,
-            state=state,
-            use_restricted_actions=retro.Actions.FILTERED,
-            obs_type=retro.Observations.IMAGE,
-            render_mode="human" if rendering else None,
-        )
-
-        env = SamuraiShowdownCustomWrapper(
-            env,
-            reset_round=True,
-            rendering=rendering,
-            max_episode_steps=20000,  # MASSIVE episodes for huge batches
-        )
-
-        env = Monitor(env)
-        env.reset(seed=seed)
-        return env
-
-    return _init
-
-
-def linear_schedule(initial_value, final_value=0.0):
-    """Linear scheduler"""
-
-    def scheduler(progress):
-        return final_value + progress * (initial_value - final_value)
-
-    return scheduler
-
-
-def check_system_resources(num_envs):
-    """Check if system can handle the requested number of environments - OPTIMIZED FOR GPU"""
-
-    # Check GPU VRAM
+def check_system_resources():
+    """Check system resources"""
     if torch.cuda.is_available():
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"🚀 GPU TRAINING System Resource Check:")
+        print(f"🚀 MEMORY OPTIMIZED System Check:")
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
         print(f"   VRAM: {gpu_memory:.1f} GB")
-        print(f"   Strategy: Maximum batch size Decision Transformer")
     else:
-        print(f"❌ CUDA not available! Falling back to CPU")
+        print(f"❌ CUDA not available! This script requires GPU.")
         return False
 
-    # Check CPU cores
-    cpu_cores = psutil.cpu_count(logical=True)
-    print(f"   CPU Cores: {cpu_cores}")
-    print(f"   Requested Envs: {num_envs}")
-
-    # Check RAM - OPTIMIZED FOR 82GB SYSTEM
     ram_gb = psutil.virtual_memory().total / (1024**3)
-    estimated_ram_usage = num_envs * 3.0  # ~3GB per environment with massive rollouts
-
-    print(f"   RAM: {ram_gb:.1f} GB (MASSIVE RAM SYSTEM)")
-    print(f"   Estimated RAM usage: {estimated_ram_usage:.1f} GB")
-    print(f"   Available for batches: {ram_gb - estimated_ram_usage - 15:.1f} GB")
-
-    if estimated_ram_usage > ram_gb * 0.5:
-        print(f"❌ ERROR: Insufficient RAM!")
-        print(f"💡 Reduce environments or rollout size")
-        return False
-
+    print(f"   RAM: {ram_gb:.1f} GB")
     return True
-
-
-def calculate_optimal_batch_size(obs_shape, context_length=30, vram_gb=12):
-    """Calculate maximum batch size that fits in VRAM"""
-    print(f"🧮 Calculating optimal batch size for {vram_gb}GB VRAM...")
-
-    # Memory estimation per sample (in bytes)
-    # States: batch_size * context_length * obs_shape * 4 bytes (float32)
-    # Actions: batch_size * context_length * 4 bytes (int32)
-    # Returns: batch_size * context_length * 4 bytes (float32)
-    # Timesteps: batch_size * context_length * 4 bytes (int32)
-
-    obs_memory_per_sample = (
-        context_length * obs_shape[0] * obs_shape[1] * obs_shape[2] * 4
-    )
-    other_memory_per_sample = context_length * 4 * 3  # actions, returns, timesteps
-    total_memory_per_sample = obs_memory_per_sample + other_memory_per_sample
-
-    # Model memory (rough estimate for transformer)
-    model_memory = 256 * 1024 * 1024 * 4  # ~1GB for model parameters
-
-    # Available memory (leave 2GB buffer for CUDA operations)
-    available_memory = (vram_gb - 2) * 1024 * 1024 * 1024
-    memory_for_batch = available_memory - model_memory
-
-    # Calculate max batch size
-    max_batch_size = int(memory_for_batch / total_memory_per_sample)
-
-    # Round down to nearest power of 2 for efficiency
-    optimal_batch_size = 1
-    while optimal_batch_size * 2 <= max_batch_size:
-        optimal_batch_size *= 2
-
-    print(f"   Memory per sample: {total_memory_per_sample / (1024**2):.1f} MB")
-    print(f"   Available for batches: {memory_for_batch / (1024**3):.1f} GB")
-    print(f"   Theoretical max batch: {max_batch_size}")
-    print(f"   Optimal batch size: {optimal_batch_size}")
-
-    return optimal_batch_size
 
 
 def get_actual_observation_dims(game, state):
     """Get actual observation dimensions from the wrapper"""
     try:
-        # Create a temporary environment to get actual dimensions - FIXED
         temp_env = retro.make(
             game=game,
             state=state,
@@ -154,36 +51,41 @@ def get_actual_observation_dims(game, state):
         return obs_shape
     except Exception as e:
         print(f"⚠️ Could not determine observation dimensions: {e}")
-        # Fallback to estimated dimensions
-        return (9, 168, 240)  # 9 frames, 75% of 224x320
+        return (9, 168, 240)  # Fallback
 
 
 def save_checkpoint(model, timesteps, save_dir):
-    """Simple checkpoint saving function"""
-    checkpoint_dir = os.path.join(save_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    """Save model checkpoint as .zip"""
+    import zipfile
 
-    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{timesteps}_steps.pth")
-    model.save(checkpoint_path)
-    print(f"💾 Checkpoint saved at {timesteps} timesteps: {checkpoint_path}")
+    # Save model state dict to temporary file
+    temp_model_path = f"temp_model_{timesteps}.pth"
+    torch.save(model.state_dict(), temp_model_path)
+
+    # Create zip file
+    zip_path = os.path.join(save_dir, f"model_{timesteps}_steps.zip")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(temp_model_path, f"model_{timesteps}_steps.pth")
+
+    # Clean up temp file
+    os.remove(temp_model_path)
+    print(f"💾 Checkpoint saved: {zip_path}")
 
 
-def collect_trajectories_with_checkpoints_single(
+def collect_trajectories_memory_optimized(
     env, total_timesteps, model, save_dir, checkpoint_interval=300000
 ):
-    """Collect trajectories with periodic model saving using single stable environment - MEMORY OPTIMIZED"""
-    print(
-        f"🎮 Collecting {total_timesteps:,} timesteps with MEMORY OPTIMIZED collection..."
-    )
-    print(f"💾 Checkpoints every {checkpoint_interval:,} steps")
+    """Collect trajectories with memory optimization"""
+    print(f"🎮 Collecting {total_timesteps:,} timesteps with MEMORY LIMITS...")
 
     trajectories = []
     current_timesteps = 0
     episode_count = 0
     last_checkpoint = 0
 
-    # AGGRESSIVE MEMORY OPTIMIZATION: Much smaller buffer
-    MAX_TRAJECTORIES = 100  # Keep only 100 trajectories in memory
+    # MEMORY FIX: Reduced trajectory limits
+    MAX_TRAJECTORIES = 50  # Reduced from 100
+    KEEP_COUNT = 10  # Keep only 10 during cleanup
 
     while current_timesteps < total_timesteps:
         trajectory = {"states": [], "actions": [], "rewards": []}
@@ -199,12 +101,11 @@ def collect_trajectories_with_checkpoints_single(
             and not truncated
             and step_count < 5000
             and current_timesteps < total_timesteps
-        ):  # Much longer episodes
+        ):
             action = env.action_space.sample()
 
             try:
                 obs, reward, done, truncated, _ = env.step(action)
-
                 trajectory["actions"].append(action)
                 trajectory["rewards"].append(reward)
                 current_timesteps += 1
@@ -213,7 +114,7 @@ def collect_trajectories_with_checkpoints_single(
                 if not done and not truncated:
                     trajectory["states"].append(obs.copy())
 
-                # Check for checkpoint save
+                # Save every 300,000 timesteps only
                 if current_timesteps - last_checkpoint >= checkpoint_interval:
                     save_checkpoint(model, current_timesteps, save_dir)
                     last_checkpoint = current_timesteps
@@ -222,26 +123,20 @@ def collect_trajectories_with_checkpoints_single(
                 print(f"⚠️ Step error in episode {episode_count}: {e}")
                 break
 
-        # Save trajectory if meaningful
+        # Save meaningful trajectories
         if len(trajectory["actions"]) > 10:
             trajectories.append(trajectory)
 
         episode_count += 1
 
-        # VERY AGGRESSIVE MEMORY MANAGEMENT: Keep only recent trajectories
+        # MEMORY FIX: Keep only last 10 trajectories
         if len(trajectories) > MAX_TRAJECTORIES:
-            # Remove oldest 75% of trajectories to free memory aggressively
-            keep_count = MAX_TRAJECTORIES // 4  # Keep only 25 trajectories
-            trajectories = trajectories[-keep_count:]
-            print(
-                f"🧹 AGGRESSIVE cleanup: keeping only last {len(trajectories)} trajectories"
-            )
+            trajectories = trajectories[-KEEP_COUNT:]
+            print(f"🧹 Memory cleanup: keeping only {len(trajectories)} trajectories")
 
-        # More frequent logging and memory checks every 5,000 timesteps
+        # Progress logging with memory monitoring
         if current_timesteps > 0 and current_timesteps % 5000 == 0:
-            recent_rewards = [
-                sum(t["rewards"]) for t in trajectories[-20:]
-            ]  # Check fewer trajectories
+            recent_rewards = [sum(t["rewards"]) for t in trajectories[-20:]]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
             win_episodes = (
                 sum(1 for r in recent_rewards if r > 0) if recent_rewards else 0
@@ -250,55 +145,42 @@ def collect_trajectories_with_checkpoints_single(
                 (win_episodes / len(recent_rewards) * 100) if recent_rewards else 0
             )
 
-            # Memory usage check
             memory_usage = psutil.virtual_memory()
             memory_percent = memory_usage.percent
             memory_gb = memory_usage.used / (1024**3)
 
             print(
-                f"   📊 {current_timesteps:,}/{total_timesteps:,} | Eps: {episode_count:,} | Traj: {len(trajectories)} | Win: {win_rate:.1f}% | RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
+                f"   📊 {current_timesteps:,}/{total_timesteps:,} | "
+                f"Eps: {episode_count:,} | Traj: {len(trajectories)} | "
+                f"Win: {win_rate:.1f}% | RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
             )
 
-            # Emergency memory cleanup if getting too high
-            if memory_percent > 30:  # Much lower threshold
+            # Emergency cleanup
+            if memory_percent > 70:
                 print(f"⚠️ MEMORY WARNING: {memory_percent:.1f}% - emergency cleanup")
-                trajectories = trajectories[-10:]  # Keep only 10 most recent
+                trajectories = trajectories[-5:]
+                gc.collect()
 
-            # Force garbage collection
-            import gc
-
-            gc.collect()
-
-    # Save final checkpoint
+    # Final checkpoint as .zip
     save_checkpoint(model, current_timesteps, save_dir)
-
     print(
-        f"✅ Collected {len(trajectories):,} trajectories over {current_timesteps:,} timesteps"
+        f"✅ Collected {len(trajectories)} trajectories over {current_timesteps:,} timesteps"
     )
     return trajectories
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Samurai Showdown Agent - Decision Transformer (CUDA Optimized)"
+        description="Train Samurai Showdown Agent - Single Process Memory Optimized"
     )
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=1000000,  # Reduced for faster testing
-        help="Total timesteps to collect for training data",
+        default=1000000,
+        help="Total timesteps to collect",
     )
     parser.add_argument(
-        "--num-envs",
-        type=int,
-        default=1,  # Use single environment for stability
-        help="Number of parallel environments (1 for stability)",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=4e-4,
-        help="Learning rate",
+        "--learning-rate", type=float, default=4e-4, help="Learning rate"
     )
     parser.add_argument(
         "--resume", type=str, default=None, help="Resume from saved model path"
@@ -308,21 +190,13 @@ def main():
         "--use-default-state", action="store_true", help="Use default game state"
     )
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=0,  # 0 = auto-calculate optimal
-        help="Batch size (0 for auto-optimal)",
+        "--batch-size", type=int, default=0, help="Batch size (0 for auto with cap)"
     )
-    parser.add_argument(
-        "--n-steps",
-        type=int,
-        default=50,  # Reduced epochs for testing
-        help="Training epochs",
-    )
+    parser.add_argument("--n-steps", type=int, default=50, help="Training epochs")
     parser.add_argument(
         "--context-length",
         type=int,
-        default=30,  # Shorter context for testing
+        default=30,
         help="Context length for Decision Transformer",
     )
     parser.add_argument(
@@ -334,32 +208,26 @@ def main():
 
     args = parser.parse_args()
 
-    # System resource check
-    if not check_system_resources(args.num_envs):
+    # System check
+    if not check_system_resources():
         sys.exit(1)
 
-    # CUDA SETUP - FORCE GPU USAGE
+    # CUDA setup
     if not torch.cuda.is_available():
         print("❌ CUDA not available! This script requires GPU.")
         sys.exit(1)
 
     device = "cuda"
-    print(f"🚀 CUDA TRAINING MODE - Using {torch.cuda.get_device_name(0)}")
+    print(f"🚀 Using {torch.cuda.get_device_name(0)}")
 
-    # Optimize CUDA settings
-    torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
-    torch.backends.cudnn.deterministic = False  # Allow non-deterministic for speed
-
-    # Clear GPU cache
+    # CUDA optimizations
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
     torch.cuda.empty_cache()
-
-    print(f"✅ Device: {device}")
-    print(f"✅ CUDA optimizations enabled")
-    print(f"💾 Checkpoints will be saved every {args.checkpoint_interval} timesteps")
 
     game = "SamuraiShodown-Genesis"
 
-    # Test if the game works
+    # Test environment
     print(f"🎮 Testing {game}...")
     try:
         test_env = retro.make(
@@ -370,10 +238,10 @@ def main():
             render_mode=None,
         )
         test_obs, _ = test_env.reset()
-        print(f"✅ Basic environment test passed - obs shape: {test_obs.shape}")
+        print(f"✅ Environment test passed - obs shape: {test_obs.shape}")
         test_env.close()
     except Exception as e:
-        print(f"❌ Basic environment test failed: {e}")
+        print(f"❌ Environment test failed: {e}")
         return
 
     # Handle state
@@ -388,30 +256,34 @@ def main():
             print(f"❌ samurai.state not found, using default state")
             state = None
 
-    # Get actual observation dimensions
-    print("🔍 Determining actual observation dimensions...")
+    # Get observation dimensions
+    print("🔍 Determining observation dimensions...")
     obs_shape = get_actual_observation_dims(game, state)
-    num_frames, obs_height, obs_width = obs_shape
     print(f"✅ Observation shape: {obs_shape}")
 
-    # Calculate optimal batch size if not specified
+    # MEMORY FIX: Cap batch size to maximum of 16
     if args.batch_size == 0:
-        optimal_batch_size = calculate_optimal_batch_size(
-            obs_shape, args.context_length, 12
+        # Simple calculation for batch size
+        context_length = args.context_length
+        obs_memory_per_sample = (
+            context_length * obs_shape[0] * obs_shape[1] * obs_shape[2] * 4
         )
-        args.batch_size = max(8, optimal_batch_size)  # Keep massive batch size
 
-    print(f"🎯 Using MASSIVE batch size: {args.batch_size}")
+        # Conservative estimate: use 2GB for batches
+        available_memory = 2 * 1024 * 1024 * 1024  # 2GB
+        max_batch_size = int(available_memory / obs_memory_per_sample)
 
+        # Cap at 16 and ensure minimum of 8
+        args.batch_size = min(16, max(8, max_batch_size))
+
+    print(f"🎯 Using batch size: {args.batch_size} (CAPPED AT 16)")
+
+    # Setup directories
     save_dir = "trained_models"
     os.makedirs(save_dir, exist_ok=True)
 
-    print(f"💾 Save directory: {save_dir}")
-
-    # Create training environment - SINGLE STABLE ENVIRONMENT
-    print(f"🏗️ Creating stable single training environment...")
-
-    # Create single environment for stability
+    # Create single training environment
+    print(f"🏗️ Creating training environment...")
     env = retro.make(
         game=game,
         state=state,
@@ -426,8 +298,7 @@ def main():
         max_episode_steps=15000,
     )
     env = Monitor(env)
-
-    print(f"✅ Single environment created successfully")
+    print(f"✅ Environment created successfully")
 
     # Test environment
     print("🧪 Testing environment...")
@@ -435,15 +306,13 @@ def main():
         obs, info = env.reset()
         print(f"✅ Reset successful - obs shape: {obs.shape}")
 
-        # Test a few steps
-        for i in range(5):
+        # Quick test
+        for i in range(3):
             action = env.action_space.sample()
             obs, reward, done, truncated, info = env.step(action)
-            print(f"   Step {i+1}: action={action}, reward={reward}, done={done}")
             if done or truncated:
                 obs, info = env.reset()
                 break
-
     except Exception as e:
         print(f"❌ Environment test failed: {e}")
         return
@@ -455,8 +324,8 @@ def main():
     model = DecisionTransformer(
         observation_shape=obs_shape,
         action_dim=action_dim,
-        hidden_size=256,  # Smaller for testing
-        n_layer=4,  # Fewer layers for testing
+        hidden_size=256,
+        n_layer=4,
         n_head=4,
         max_ep_len=2000,
     )
@@ -467,22 +336,18 @@ def main():
         model.load_state_dict(torch.load(args.resume, map_location=device))
         print(f"✅ Model loaded successfully")
 
-    print(
-        f"✅ Model created with {sum(p.numel() for p in model.parameters())} parameters"
-    )
+    param_count = sum(p.numel() for p in model.parameters())
+    print(f"✅ Model created with {param_count:,} parameters")
 
-    # Collect trajectories with checkpoints
-    print(
-        f"📊 Collecting {args.total_timesteps:,} timesteps with single stable environment..."
-    )
-
-    trajectories = collect_trajectories_with_checkpoints_single(
+    # Collect trajectories
+    print(f"📊 Starting trajectory collection...")
+    trajectories = collect_trajectories_memory_optimized(
         env, args.total_timesteps, model, save_dir, args.checkpoint_interval
     )
 
     print(f"✅ Collected {len(trajectories)} trajectories")
 
-    # Filter trajectories with some reward signal
+    # Filter good trajectories
     good_trajectories = [
         t for t in trajectories if len(t["rewards"]) > 10 and sum(t["rewards"]) != 0
     ]
@@ -492,7 +357,6 @@ def main():
         print("⚠️ Using all trajectories due to limited good data")
         good_trajectories = trajectories
 
-    # Only proceed if we have enough data
     if len(good_trajectories) < 2:
         print("❌ Not enough trajectories for training")
         return
@@ -514,20 +378,32 @@ def main():
         context_length=args.context_length,
     )
 
-    # Save final model
-    model_path = os.path.join(save_dir, "decision_transformer_samurai_final.pth")
-    trained_model.save(model_path)
+    # Save final model as .zip
+    import zipfile
+
+    temp_model_path = "temp_final_model.pth"
+    torch.save(trained_model.state_dict(), temp_model_path)
+
+    final_zip_path = os.path.join(save_dir, "decision_transformer_samurai_final.zip")
+    with zipfile.ZipFile(final_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+        zipf.write(temp_model_path, "decision_transformer_samurai_final.pth")
+
+    os.remove(temp_model_path)
 
     print(f"🎉 Training completed!")
-    print(f"💾 Final model saved to: {model_path}")
+    print(f"💾 Final model saved to: {final_zip_path}")
 
-    # Print GPU memory usage
+    # Memory usage summary
     if torch.cuda.is_available():
-        print(f"🔧 GPU Memory Usage:")
+        print(f"🔧 Final GPU Memory:")
         print(f"   Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
         print(f"   Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
 
-    # Close environment
+    final_memory = psutil.virtual_memory()
+    print(
+        f"🔧 Final RAM Usage: {final_memory.used / (1024**3):.1f} GB ({final_memory.percent:.1f}%)"
+    )
+
     env.close()
 
 
