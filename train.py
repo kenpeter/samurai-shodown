@@ -81,32 +81,99 @@ def model_based_action_selection(
     timestep,
     device="cuda",
     temperature=1.0,
+    context_length=30,
 ):
-    """Use the trained model to select actions"""
+    """Use the trained model to select actions with fixed sequence length"""
     try:
         model.eval()
         with torch.no_grad():
-            # Convert to tensors
-            states_tensor = (
-                torch.from_numpy(np.array(context_states)).float().unsqueeze(0) / 255.0
-            )  # Normalize
-            actions_tensor = (
-                torch.from_numpy(np.array(context_actions)).long().unsqueeze(0)
+            # Ensure we have at least some context
+            if len(context_states) == 0:
+                return None
+
+            # Convert to numpy arrays
+            states_array = np.array(context_states)
+            actions_array = (
+                np.array(context_actions) if len(context_actions) > 0 else np.array([0])
             )
+            rewards_array = (
+                np.array(context_rewards)
+                if len(context_rewards) > 0
+                else np.array([0.0])
+            )
+
+            # Pad or truncate to fixed length
+            seq_len = min(len(states_array), context_length)
+
+            # Take the most recent seq_len items
+            if len(states_array) > seq_len:
+                states_array = states_array[-seq_len:]
+                actions_array = (
+                    actions_array[-seq_len:]
+                    if len(actions_array) >= seq_len
+                    else np.pad(
+                        actions_array,
+                        (seq_len - len(actions_array), 0),
+                        mode="constant",
+                        constant_values=0,
+                    )[-seq_len:]
+                )
+                rewards_array = (
+                    rewards_array[-seq_len:]
+                    if len(rewards_array) >= seq_len
+                    else np.pad(
+                        rewards_array,
+                        (seq_len - len(rewards_array), 0),
+                        mode="constant",
+                        constant_values=0.0,
+                    )[-seq_len:]
+                )
+            else:
+                # Pad to seq_len
+                pad_length = seq_len - len(states_array)
+                if pad_length > 0:
+                    # Pad states with zeros
+                    pad_states = np.zeros(
+                        (pad_length,) + states_array.shape[1:], dtype=states_array.dtype
+                    )
+                    states_array = np.concatenate([pad_states, states_array], axis=0)
+
+                    # Pad actions with zeros
+                    actions_array = np.pad(
+                        actions_array,
+                        (pad_length, 0),
+                        mode="constant",
+                        constant_values=0,
+                    )
+
+                    # Pad rewards with zeros
+                    rewards_array = np.pad(
+                        rewards_array,
+                        (pad_length, 0),
+                        mode="constant",
+                        constant_values=0.0,
+                    )
+
+            # Ensure exact length
+            states_array = states_array[:seq_len]
+            actions_array = actions_array[:seq_len]
+            rewards_array = rewards_array[:seq_len]
 
             # Calculate returns-to-go
-            returns = np.array(context_rewards)
-            returns_to_go = np.zeros_like(returns, dtype=np.float32)
+            returns_to_go = np.zeros_like(rewards_array, dtype=np.float32)
             running_return = 0
             gamma = 0.99
-            for i in reversed(range(len(returns))):
-                running_return = returns[i] + gamma * running_return
+            for i in reversed(range(len(rewards_array))):
+                running_return = rewards_array[i] + gamma * running_return
                 returns_to_go[i] = running_return
 
+            # Convert to tensors
+            states_tensor = (
+                torch.from_numpy(states_array).float().unsqueeze(0) / 255.0
+            )  # Normalize
+            actions_tensor = torch.from_numpy(actions_array).long().unsqueeze(0)
             rtg_tensor = torch.from_numpy(returns_to_go).float().unsqueeze(0)
-            timesteps_tensor = (
-                torch.from_numpy(np.arange(len(context_states))).long().unsqueeze(0)
-            )
+            timesteps_tensor = torch.arange(seq_len).long().unsqueeze(0)
 
             # Move to device
             states_tensor = states_tensor.to(device)
@@ -198,6 +265,7 @@ def collect_trajectories_with_model(
                     step_count,
                     device=device,
                     temperature=1.2,  # Slightly random for exploration
+                    context_length=context_length,
                 )
 
                 if action is not None:
