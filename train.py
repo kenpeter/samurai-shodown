@@ -158,34 +158,15 @@ def get_actual_observation_dims(game, state):
         return (9, 168, 240)  # 9 frames, 75% of 224x320
 
 
-def save_checkpoint(model, timesteps, save_dir):
-    """Simple checkpoint saving function"""
-    checkpoint_dir = os.path.join(save_dir, "checkpoints")
-    os.makedirs(checkpoint_dir, exist_ok=True)
-
-    checkpoint_path = os.path.join(checkpoint_dir, f"checkpoint_{timesteps}_steps.pth")
-    model.save(checkpoint_path)
-    print(f"💾 Checkpoint saved at {timesteps} timesteps: {checkpoint_path}")
-
-
-def collect_trajectories_with_checkpoints_single(
-    env, total_timesteps, model, save_dir, checkpoint_interval=300000
-):
-    """Collect trajectories with periodic model saving using single stable environment - MEMORY OPTIMIZED"""
-    print(
-        f"🎮 Collecting {total_timesteps:,} timesteps with MEMORY OPTIMIZED collection..."
-    )
-    print(f"💾 Checkpoints every {checkpoint_interval:,} steps")
-
+def collect_trajectories_simple(env, num_timesteps, max_trajectories=200):
+    """Collect trajectories with memory management - NO SAVING HERE"""
+    print(f"🎮 Collecting {num_timesteps:,} timesteps (max {max_trajectories} trajectories)...")
+    
     trajectories = []
     current_timesteps = 0
     episode_count = 0
-    last_checkpoint = 0
 
-    # AGGRESSIVE MEMORY OPTIMIZATION: Much smaller buffer
-    MAX_TRAJECTORIES = 100  # Keep only 100 trajectories in memory
-
-    while current_timesteps < total_timesteps:
+    while current_timesteps < num_timesteps and len(trajectories) < max_trajectories:
         trajectory = {"states": [], "actions": [], "rewards": []}
         obs, _ = env.reset()
         trajectory["states"].append(obs.copy())
@@ -198,8 +179,8 @@ def collect_trajectories_with_checkpoints_single(
             not done
             and not truncated
             and step_count < 5000
-            and current_timesteps < total_timesteps
-        ):  # Much longer episodes
+            and current_timesteps < num_timesteps
+        ):
             action = env.action_space.sample()
 
             try:
@@ -213,11 +194,6 @@ def collect_trajectories_with_checkpoints_single(
                 if not done and not truncated:
                     trajectory["states"].append(obs.copy())
 
-                # Check for checkpoint save
-                if current_timesteps - last_checkpoint >= checkpoint_interval:
-                    save_checkpoint(model, current_timesteps, save_dir)
-                    last_checkpoint = current_timesteps
-
             except Exception as e:
                 print(f"⚠️ Step error in episode {episode_count}: {e}")
                 break
@@ -228,64 +204,160 @@ def collect_trajectories_with_checkpoints_single(
 
         episode_count += 1
 
-        # VERY AGGRESSIVE MEMORY MANAGEMENT: Keep only recent trajectories
-        if len(trajectories) > MAX_TRAJECTORIES:
-            # Remove oldest 75% of trajectories to free memory aggressively
-            keep_count = MAX_TRAJECTORIES // 4  # Keep only 25 trajectories
-            trajectories = trajectories[-keep_count:]
-            print(
-                f"🧹 AGGRESSIVE cleanup: keeping only last {len(trajectories)} trajectories"
-            )
+        # Memory management
+        if len(trajectories) > max_trajectories:
+            trajectories = trajectories[-max_trajectories//2:]  # Keep newest half
+            print(f"🧹 Memory cleanup: keeping {len(trajectories)} trajectories")
 
-        # More frequent logging and memory checks every 5,000 timesteps
-        if current_timesteps > 0 and current_timesteps % 5000 == 0:
-            recent_rewards = [
-                sum(t["rewards"]) for t in trajectories[-20:]
-            ]  # Check fewer trajectories
+        # Logging every 10,000 timesteps
+        if current_timesteps > 0 and current_timesteps % 10000 == 0:
+            recent_rewards = [sum(t["rewards"]) for t in trajectories[-20:]]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
-            win_episodes = (
-                sum(1 for r in recent_rewards if r > 0) if recent_rewards else 0
-            )
-            win_rate = (
-                (win_episodes / len(recent_rewards) * 100) if recent_rewards else 0
-            )
+            win_episodes = sum(1 for r in recent_rewards if r > 0) if recent_rewards else 0
+            win_rate = (win_episodes / len(recent_rewards) * 100) if recent_rewards else 0
 
-            # Memory usage check
-            memory_usage = psutil.virtual_memory()
-            memory_percent = memory_usage.percent
-            memory_gb = memory_usage.used / (1024**3)
+            print(f"   📊 {current_timesteps:,}/{num_timesteps:,} | Episodes: {episode_count:,} | Trajectories: {len(trajectories)} | Win Rate: {win_rate:.1f}%")
 
-            print(
-                f"   📊 {current_timesteps:,}/{total_timesteps:,} | Eps: {episode_count:,} | Traj: {len(trajectories)} | Win: {win_rate:.1f}% | RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
-            )
-
-            # Emergency memory cleanup if getting too high
-            if memory_percent > 30:  # Much lower threshold
-                print(f"⚠️ MEMORY WARNING: {memory_percent:.1f}% - emergency cleanup")
-                trajectories = trajectories[-10:]  # Keep only 10 most recent
-
-            # Force garbage collection
-            import gc
-
-            gc.collect()
-
-    # Save final checkpoint
-    save_checkpoint(model, current_timesteps, save_dir)
-
-    print(
-        f"✅ Collected {len(trajectories):,} trajectories over {current_timesteps:,} timesteps"
-    )
+    print(f"✅ Collected {len(trajectories):,} trajectories over {current_timesteps:,} timesteps")
     return trajectories
+
+
+def train_decision_transformer_with_checkpoints(
+    model,
+    trajectories,
+    epochs=200,
+    batch_size=64,
+    lr=1e-4,
+    device="cuda",
+    context_length=50,
+    save_dir=None,
+    checkpoint_interval=20,  # Save every N epochs
+):
+    """FIXED: Train Decision Transformer with proper checkpoint saving during training"""
+    
+    # Import the training function from wrapper
+    from wrapper import TrajectoryDataset
+    from torch.utils.data import DataLoader
+    from torch.optim import AdamW
+    import torch.nn.functional as F
+
+    # Create dataset and dataloader
+    dataset = TrajectoryDataset(trajectories, context_length)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=4,
+        persistent_workers=True,
+    )
+
+    # Optimizer
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4, betas=(0.9, 0.95))
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs)
+
+    model.to(device)
+    model.train()
+
+    print(f"🚀 CUDA Training Decision Transformer with PROPER CHECKPOINTS:")
+    print(f"   Device: {device}")
+    print(f"   Epochs: {epochs}")
+    print(f"   Batch size: {batch_size}")
+    print(f"   Learning rate: {lr}")
+    print(f"   Context length: {context_length}")
+    print(f"   Dataset size: {len(dataset)}")
+    print(f"   💾 Checkpoint every {checkpoint_interval} epochs")
+
+    # Create checkpoint directory
+    if save_dir:
+        checkpoint_dir = os.path.join(save_dir, "training_checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
+
+    scaler = torch.cuda.amp.GradScaler()
+    best_loss = float("inf")
+
+    for epoch in range(epochs):
+        total_loss = 0
+        num_batches = 0
+        epoch_start_time = time.time()
+
+        for batch_idx, batch in enumerate(dataloader):
+            states = batch["states"].to(device, non_blocking=True)
+            actions = batch["actions"].to(device, non_blocking=True)
+            returns_to_go = batch["returns_to_go"].to(device, non_blocking=True)
+            timesteps = batch["timesteps"].to(device, non_blocking=True)
+
+            optimizer.zero_grad()
+
+            with torch.cuda.amp.autocast():
+                action_logits = model(states, actions, returns_to_go, timesteps)
+
+                if action_logits.shape[1] > 1:
+                    targets = actions[:, 1:]
+                    predictions = action_logits[:, :-1]
+                    loss = F.cross_entropy(
+                        predictions.reshape(-1, predictions.shape[-1]),
+                        targets.reshape(-1),
+                    )
+                else:
+                    continue
+
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            total_loss += loss.item()
+            num_batches += 1
+
+        scheduler.step()
+        epoch_time = time.time() - epoch_start_time
+        avg_loss = total_loss / max(num_batches, 1)
+
+        if avg_loss < best_loss:
+            best_loss = avg_loss
+
+        # FIXED: Save checkpoints during actual training
+        if save_dir and (epoch + 1) % checkpoint_interval == 0:
+            checkpoint_path = os.path.join(checkpoint_dir, f"epoch_{epoch+1}_loss_{avg_loss:.4f}.pth")
+            try:
+                torch.save(model.state_dict(), checkpoint_path)
+                file_size = os.path.getsize(checkpoint_path) / (1024 * 1024)
+                print(f"💾 TRAINING CHECKPOINT SAVED: epoch_{epoch+1}_loss_{avg_loss:.4f}.pth ({file_size:.1f}MB)")
+            except Exception as e:
+                print(f"❌ Failed to save checkpoint: {e}")
+
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"   Epoch {epoch + 1}/{epochs}, Loss: {avg_loss:.4f}, LR: {scheduler.get_last_lr()[0]:.6f}, Time: {epoch_time:.1f}s")
+
+            if torch.cuda.is_available():
+                allocated = torch.cuda.memory_allocated() / 1024**3
+                cached = torch.cuda.memory_reserved() / 1024**3
+                print(f"   GPU Memory: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
+
+    print(f"✅ TRAINING COMPLETE! Best loss: {best_loss:.4f}")
+    
+    # Save best model
+    if save_dir:
+        best_model_path = os.path.join(save_dir, f"best_model_loss_{best_loss:.4f}.pth")
+        try:
+            torch.save(model.state_dict(), best_model_path)
+            print(f"💾 BEST MODEL SAVED: {best_model_path}")
+        except Exception as e:
+            print(f"❌ Failed to save best model: {e}")
+    
+    return model
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Samurai Showdown Agent - Decision Transformer (CUDA Optimized)"
+        description="Train Samurai Showdown Agent - Decision Transformer (FIXED SAVE VERSION)"
     )
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=50000000,  # Reduced for faster testing
+        default=100000,  # Reduced for testing - increase later
         help="Total timesteps to collect for training data",
     )
     parser.add_argument(
@@ -314,22 +386,28 @@ def main():
         help="Batch size (0 for auto-optimal)",
     )
     parser.add_argument(
-        "--n-steps",
+        "--epochs",
         type=int,
-        default=50,  # Reduced epochs for testing
+        default=100,  # Training epochs
         help="Training epochs",
     )
     parser.add_argument(
         "--context-length",
         type=int,
-        default=30,  # Shorter context for testing
+        default=30,
         help="Context length for Decision Transformer",
     )
     parser.add_argument(
         "--checkpoint-interval",
         type=int,
-        default=300000,
-        help="Save checkpoint every N timesteps",
+        default=60,  # Save every 60 epochs
+        help="Save checkpoint every N training epochs",
+    )
+    parser.add_argument(
+        "--max-trajectories",
+        type=int,
+        default=300,
+        help="Maximum trajectories to keep in memory",
     )
 
     args = parser.parse_args()
@@ -347,15 +425,15 @@ def main():
     print(f"🚀 CUDA TRAINING MODE - Using {torch.cuda.get_device_name(0)}")
 
     # Optimize CUDA settings
-    torch.backends.cudnn.benchmark = True  # Optimize for consistent input sizes
-    torch.backends.cudnn.deterministic = False  # Allow non-deterministic for speed
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.deterministic = False
 
     # Clear GPU cache
     torch.cuda.empty_cache()
 
     print(f"✅ Device: {device}")
     print(f"✅ CUDA optimizations enabled")
-    print(f"💾 Checkpoints will be saved every {args.checkpoint_interval} timesteps")
+    print(f"💾 Training checkpoints will be saved every {args.checkpoint_interval} epochs")
 
     game = "SamuraiShodown-Genesis"
 
@@ -399,9 +477,9 @@ def main():
         optimal_batch_size = calculate_optimal_batch_size(
             obs_shape, args.context_length, 12
         )
-        args.batch_size = max(8, optimal_batch_size)  # Keep massive batch size
+        args.batch_size = max(8, optimal_batch_size)
 
-    print(f"🎯 Using MASSIVE batch size: {args.batch_size}")
+    print(f"🎯 Using batch size: {args.batch_size}")
 
     save_dir = "trained_models"
     os.makedirs(save_dir, exist_ok=True)
@@ -411,7 +489,6 @@ def main():
     # Create training environment - SINGLE STABLE ENVIRONMENT
     print(f"🏗️ Creating stable single training environment...")
 
-    # Create single environment for stability
     env = retro.make(
         game=game,
         state=state,
@@ -423,7 +500,7 @@ def main():
         env,
         reset_round=True,
         rendering=args.render,
-        max_episode_steps=15000,
+        max_episode_steps=5000,  # Reasonable episode length
     )
     env = Monitor(env)
 
@@ -455,8 +532,8 @@ def main():
     model = DecisionTransformer(
         observation_shape=obs_shape,
         action_dim=action_dim,
-        hidden_size=256,  # Smaller for testing
-        n_layer=4,  # Fewer layers for testing
+        hidden_size=256,
+        n_layer=4,
         n_head=4,
         max_ep_len=2000,
     )
@@ -467,17 +544,12 @@ def main():
         model.load_state_dict(torch.load(args.resume, map_location=device))
         print(f"✅ Model loaded successfully")
 
-    print(
-        f"✅ Model created with {sum(p.numel() for p in model.parameters())} parameters"
-    )
+    print(f"✅ Model created with {sum(p.numel() for p in model.parameters())} parameters")
 
-    # Collect trajectories with checkpoints
-    print(
-        f"📊 Collecting {args.total_timesteps:,} timesteps with single stable environment..."
-    )
-
-    trajectories = collect_trajectories_with_checkpoints_single(
-        env, args.total_timesteps, model, save_dir, args.checkpoint_interval
+    # FIXED: Collect trajectories WITHOUT saving untrained models
+    print(f"📊 Collecting {args.total_timesteps:,} timesteps...")
+    trajectories = collect_trajectories_simple(
+        env, args.total_timesteps, args.max_trajectories
     )
 
     print(f"✅ Collected {len(trajectories)} trajectories")
@@ -497,29 +569,54 @@ def main():
         print("❌ Not enough trajectories for training")
         return
 
-    # Train Decision Transformer
-    print(f"🏋️ Training Decision Transformer...")
-    print(f"   Epochs: {args.n_steps}")
+    # FIXED: Train Decision Transformer with proper checkpoint saving
+    print(f"🏋️ Training Decision Transformer with PROPER CHECKPOINTS...")
+    print(f"   Epochs: {args.epochs}")
     print(f"   Batch size: {args.batch_size}")
     print(f"   Learning rate: {args.learning_rate}")
     print(f"   Context length: {args.context_length}")
+    print(f"   💾 Checkpoints every {args.checkpoint_interval} epochs")
 
-    trained_model = train_decision_transformer(
+    trained_model = train_decision_transformer_with_checkpoints(
         model=model,
         trajectories=good_trajectories,
-        epochs=args.n_steps,
+        epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.learning_rate,
         device=device,
         context_length=args.context_length,
+        save_dir=save_dir,
+        checkpoint_interval=args.checkpoint_interval,
     )
 
     # Save final model
-    model_path = os.path.join(save_dir, "decision_transformer_samurai_final.pth")
-    trained_model.save(model_path)
+    final_model_path = os.path.join(save_dir, "decision_transformer_samurai_FINAL.pth")
+    try:
+        torch.save(trained_model.state_dict(), final_model_path)
+        file_size = os.path.getsize(final_model_path) / (1024 * 1024)
+        print(f"💾 FINAL MODEL SAVED: {final_model_path} ({file_size:.1f}MB)")
+    except Exception as e:
+        print(f"❌ Failed to save final model: {e}")
 
     print(f"🎉 Training completed!")
-    print(f"💾 Final model saved to: {model_path}")
+    print(f"💾 Check these directories for your saved models:")
+    print(f"   📁 Training checkpoints: {save_dir}/training_checkpoints/")
+    print(f"   📁 Final model: {final_model_path}")
+
+    # List saved files
+    try:
+        checkpoint_dir = os.path.join(save_dir, "training_checkpoints")
+        if os.path.exists(checkpoint_dir):
+            checkpoints = os.listdir(checkpoint_dir)
+            print(f"   📋 Saved {len(checkpoints)} training checkpoints")
+            for cp in sorted(checkpoints)[:5]:  # Show first 5
+                cp_path = os.path.join(checkpoint_dir, cp)
+                size_mb = os.path.getsize(cp_path) / (1024 * 1024)
+                print(f"      📄 {cp} ({size_mb:.1f}MB)")
+            if len(checkpoints) > 5:
+                print(f"      ... and {len(checkpoints) - 5} more")
+    except Exception as e:
+        print(f"⚠️ Could not list checkpoint files: {e}")
 
     # Print GPU memory usage
     if torch.cuda.is_available():
