@@ -324,7 +324,9 @@ class DecisionTransformer(nn.Module):
 
         # CNN encoder
         self.cnn_encoder = nn.Sequential(
+            # 9 frame with resize height and width; 32 fature map. 8x8 filter size; stride move 4 at a time
             nn.Conv2d(observation_shape[0], 32, kernel_size=8, stride=4, padding=2),
+            # move in place less mem
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
