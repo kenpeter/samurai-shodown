@@ -176,7 +176,7 @@ def main():
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=1000000,
+        default=10000000,
         help="Total timesteps to collect",
     )
     parser.add_argument(
