@@ -55,201 +55,23 @@ def get_actual_observation_dims(game, state):
         return (9, 168, 240)  # Fallback
 
 
-def save_checkpoint(model, timesteps, save_dir):
-    """Save model checkpoint as .zip"""
-    import zipfile
-
-    # Save model state dict to temporary file
-    temp_model_path = f"temp_model_{timesteps}.pth"
-    torch.save(model.state_dict(), temp_model_path)
-
-    # Create zip file
-    zip_path = os.path.join(save_dir, f"model_{timesteps}_steps.zip")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        zipf.write(temp_model_path, f"model_{timesteps}_steps.pth")
-
-    # Clean up temp file
-    os.remove(temp_model_path)
-    print(f"💾 Checkpoint saved: {zip_path}")
-
-
-def model_based_action_selection(
-    model,
-    context_states,
-    context_actions,
-    context_rewards,
-    timestep,
-    device="cuda",
-    temperature=1.0,
-    context_length=20,
-):
-    """Use the trained model to select actions with GUARANTEED fixed sequence length"""
-    try:
-        model.eval()
-        with torch.no_grad():
-            # Ensure we have context
-            if len(context_states) == 0:
-                return None
-
-            # FIXED LENGTH APPROACH: Always use exactly 20 steps (reduced for stability)
-            fixed_len = 20  # Use smaller fixed length to avoid tensor issues
-
-            # Get states, actions, rewards with proper alignment
-            states_list = list(context_states)
-            actions_list = list(context_actions)
-            rewards_list = list(context_rewards)
-
-            # Ensure actions and rewards align with states (actions/rewards are 1 step behind states)
-            if len(actions_list) == len(states_list):
-                # Remove last action/reward to align properly
-                actions_list = actions_list[:-1] if len(actions_list) > 0 else []
-                rewards_list = rewards_list[:-1] if len(rewards_list) > 0 else []
-
-            # Pad actions and rewards to match states length - 1
-            target_ar_len = len(states_list) - 1
-            while len(actions_list) < target_ar_len:
-                actions_list.append(0)
-            while len(rewards_list) < target_ar_len:
-                rewards_list.append(0.0)
-
-            # Truncate actions and rewards if too long
-            actions_list = actions_list[:target_ar_len]
-            rewards_list = rewards_list[:target_ar_len]
-
-            # Now handle the sequence length
-            if len(states_list) >= fixed_len:
-                # Use last fixed_len states
-                states_array = np.array(states_list[-fixed_len:])
-                actions_array = np.array(
-                    actions_list[-(fixed_len - 1) :] + [0]
-                )  # Pad last action
-                rewards_array = np.array(
-                    rewards_list[-(fixed_len - 1) :] + [0.0]
-                )  # Pad last reward
-            else:
-                # Pad to fixed_len
-                states_array = np.array(states_list)
-                actions_array = np.array(actions_list + [0])  # Add dummy action
-                rewards_array = np.array(rewards_list + [0.0])  # Add dummy reward
-
-                # Pad states
-                pad_states = np.zeros(
-                    (fixed_len - len(states_array),) + states_array.shape[1:],
-                    dtype=states_array.dtype,
-                )
-                states_array = np.concatenate([pad_states, states_array], axis=0)
-
-                # Pad actions and rewards
-                actions_array = np.pad(
-                    actions_array,
-                    (fixed_len - len(actions_array), 0),
-                    constant_values=0,
-                )
-                rewards_array = np.pad(
-                    rewards_array,
-                    (fixed_len - len(rewards_array), 0),
-                    constant_values=0.0,
-                )
-
-            # GUARANTEE exact lengths
-            states_array = states_array[:fixed_len]
-            actions_array = actions_array[:fixed_len]
-            rewards_array = rewards_array[:fixed_len]
-
-            # Triple check - all arrays must be exactly fixed_len
-            assert (
-                len(states_array) == fixed_len
-            ), f"States length {len(states_array)} != {fixed_len}"
-            assert (
-                len(actions_array) == fixed_len
-            ), f"Actions length {len(actions_array)} != {fixed_len}"
-            assert (
-                len(rewards_array) == fixed_len
-            ), f"Rewards length {len(rewards_array)} != {fixed_len}"
-
-            # Calculate returns-to-go
-            returns_to_go = np.zeros(fixed_len, dtype=np.float32)
-            running_return = 0
-            gamma = 0.99
-            for i in reversed(range(fixed_len)):
-                running_return = rewards_array[i] + gamma * running_return
-                returns_to_go[i] = running_return
-
-            # Convert to tensors with guaranteed shapes
-            states_tensor = (
-                torch.from_numpy(states_array).float().unsqueeze(0) / 255.0
-            )  # [1, fixed_len, ...]
-            actions_tensor = (
-                torch.from_numpy(actions_array).long().unsqueeze(0)
-            )  # [1, fixed_len]
-            rtg_tensor = (
-                torch.from_numpy(returns_to_go).float().unsqueeze(0)
-            )  # [1, fixed_len]
-            timesteps_tensor = (
-                torch.arange(fixed_len).long().unsqueeze(0)
-            )  # [1, fixed_len]
-
-            # Final shape verification
-            assert states_tensor.shape[1] == fixed_len
-            assert actions_tensor.shape[1] == fixed_len
-            assert rtg_tensor.shape[1] == fixed_len
-            assert timesteps_tensor.shape[1] == fixed_len
-
-            # Move to device
-            states_tensor = states_tensor.to(device)
-            actions_tensor = actions_tensor.to(device)
-            rtg_tensor = rtg_tensor.to(device)
-            timesteps_tensor = timesteps_tensor.to(device)
-
-            # Get action from model
-            logits = model(states_tensor, actions_tensor, rtg_tensor, timesteps_tensor)
-            last_logits = logits[0, -1] / temperature
-
-            # Sample action
-            probs = torch.softmax(last_logits, dim=-1)
-            action = torch.multinomial(probs, 1).item()
-
-            return action
-
-    except Exception as e:
-        print(f"⚠️ Model action selection failed: {e}")
-        return None
-
-
-def collect_trajectories_with_model(
+def collect_trajectories(
     env,
     total_timesteps,
-    model,
-    save_dir,
-    checkpoint_interval=300000,
     device="cuda",
-    use_model_probability=0.8,
     context_length=30,
 ):
-    """Collect trajectories using trained model for action selection"""
-    print(f"🎮 Collecting {total_timesteps:,} timesteps with MODEL-BASED actions...")
-    print(
-        f"   Model usage: {use_model_probability*100:.0f}% model, {(1-use_model_probability)*100:.0f}% random"
-    )
-
-    # Define action sets at the beginning - THIS FIXES THE BUG!
-    attack_actions = [8, 9, 10, 11]  # Common attack button mappings
-    blocking_actions = [4, 5, 6, 7]  # Common blocking/defensive actions
+    """Collect trajectories using random actions"""
+    print(f"🎮 Collecting {total_timesteps:,} timesteps with RANDOM actions...")
 
     trajectories = []
     current_timesteps = 0
     episode_count = 0
-    last_checkpoint = 0
-    model_actions = 0
-    random_actions = 0
 
     # MEMORY FIX: Reduced trajectory limits
     MAX_TRAJECTORIES = 50
     KEEP_COUNT = 10
     MAX_EPISODE_STEPS = 5000
-
-    # Check if model is trainable (has been trained at least once)
-    model_is_trained = hasattr(model, "_is_trained") and model._is_trained
 
     while current_timesteps < total_timesteps:
         trajectory = {"states": [], "actions": [], "rewards": []}
@@ -260,115 +82,17 @@ def collect_trajectories_with_model(
         truncated = False
         step_count = 0
 
-        # Context for model-based action selection
-        context_states = collections.deque(maxlen=context_length)
-        context_actions = collections.deque(maxlen=context_length)
-        context_rewards = collections.deque(maxlen=context_length)
-
-        # Initialize context with first state
-        context_states.append(obs.copy())
-
         while (
             not done
             and not truncated
             and step_count < MAX_EPISODE_STEPS
             and current_timesteps < total_timesteps
         ):
-            action = None
-
-            # Decide whether to use model or random action
-            use_model = (
-                model_is_trained
-                and len(context_states)
-                >= min(15, context_length)  # Need more context for stability
-                and len(context_actions)
-                >= min(10, context_length - 5)  # Ensure actions exist
-                and np.random.random() < use_model_probability
-            )
-
-            if use_model:
-                # Ensure context arrays are the same length before passing to model
-                min_context_len = min(
-                    len(context_states),
-                    len(context_actions) + 1,
-                    len(context_rewards) + 1,
-                )
-                if min_context_len >= 10:  # Need minimum context
-                    # Use model for action selection
-                    action = model_based_action_selection(
-                        model,
-                        list(context_states)[
-                            -min_context_len:
-                        ],  # Truncate to same length
-                        (
-                            list(context_actions)[-(min_context_len - 1) :]
-                            if len(context_actions) > 0
-                            else [0]
-                        ),  # Actions are 1 less than states
-                        (
-                            list(context_rewards)[-(min_context_len - 1) :]
-                            if len(context_rewards) > 0
-                            else [0.0]
-                        ),  # Rewards are 1 less than states
-                        step_count,
-                        device=device,
-                        temperature=1.2,  # Slightly random for exploration
-                        context_length=20,  # Use reduced context length for stability
-                    )
-
-                if action is not None:
-                    model_actions += 1
-                else:
-                    # Fallback to random if model fails
-                    action = env.action_space.sample()
-                    random_actions += 1
-            else:
-                # Random action (for exploration or when model not ready)
-                action = env.action_space.sample()
-                random_actions += 1
-
-            # FORCE AGGRESSION: Bias action selection toward attacks
-            if np.random.random() < 0.4:  # 40% chance to force attack
-                action = np.random.choice(attack_actions)
-
-            # Reduce excessive jumping (action 0 is often jump)
-            if action == 0 and np.random.random() > 0.1:  # Reduced tolerance
-                action = np.random.choice(attack_actions)  # Force attack instead
-
-            # REDUCE BLOCKING: Discourage defensive actions
-            if (
-                action in blocking_actions and np.random.random() < 0.6
-            ):  # 60% chance to override
-                action = np.random.choice(attack_actions)  # Replace with attack
-
-            # ENCOURAGE ATTACKING: Give BIG bonus for attack actions
-            attack_bonus = 0.3 if action in attack_actions else 0.0  # TRIPLED from 0.1!
+            # Simple random action selection - wrapper will handle aggression
+            action = env.action_space.sample()
 
             try:
                 obs, reward, done, truncated, _ = env.step(action)
-
-                # MASSIVE ATTACK BONUS to encourage aggressive play
-                reward += attack_bonus
-
-                # AGGRESSION SCALING: Bigger bonus for consecutive attacks
-                if action in attack_actions:
-                    if hasattr(env, "_consecutive_attacks"):
-                        env._consecutive_attacks += 1
-                    else:
-                        env._consecutive_attacks = 1
-                    # Combo bonus: More attacks in a row = bigger bonus
-                    combo_bonus = min(env._consecutive_attacks * 0.1, 0.5)  # Max +0.5
-                    reward += combo_bonus
-                else:
-                    env._consecutive_attacks = 0  # Reset combo counter
-
-                # QUICK FINISH BONUS: Reward fast decisive victories
-                if done and not truncated and step_count < 1000:
-                    quick_finish_bonus = 1.0 - (step_count / 1000)  # Up to +1.0 bonus
-                    reward += quick_finish_bonus
-                    print(
-                        f"🚀 QUICK FINISH BONUS: +{quick_finish_bonus:.2f} for {step_count} step victory!"
-                    )
 
                 # Store in trajectory
                 trajectory["actions"].append(action)
@@ -376,18 +100,8 @@ def collect_trajectories_with_model(
                 current_timesteps += 1
                 step_count += 1
 
-                # Update context for next action selection
-                context_actions.append(action)
-                context_rewards.append(reward)
-
                 if not done and not truncated:
                     trajectory["states"].append(obs.copy())
-                    context_states.append(obs.copy())
-
-                # Save checkpoint
-                if current_timesteps - last_checkpoint >= checkpoint_interval:
-                    save_checkpoint(model, current_timesteps, save_dir)
-                    last_checkpoint = current_timesteps
 
                 # FORCE episode termination if too long
                 if step_count >= MAX_EPISODE_STEPS:
@@ -435,15 +149,10 @@ def collect_trajectories_with_model(
             memory_percent = memory_usage.percent
             memory_gb = memory_usage.used / (1024**3)
 
-            total_actions = model_actions + random_actions
-            model_usage = (
-                (model_actions / total_actions * 100) if total_actions > 0 else 0
-            )
-
             print(
                 f"   📊 {current_timesteps:,}/{total_timesteps:,} | "
                 f"Eps: {episode_count:,} | Traj: {len(trajectories)} | "
-                f"Win: {win_rate:.1f}% | Model: {model_usage:.1f}% | "
+                f"Win: {win_rate:.1f}% | "
                 f"RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
             )
 
@@ -453,165 +162,38 @@ def collect_trajectories_with_model(
                 trajectories = trajectories[-5:]
                 gc.collect()
 
-    # Final checkpoint
-    save_checkpoint(model, current_timesteps, save_dir)
-
     print(
         f"✅ Collected {len(trajectories)} trajectories over {current_timesteps:,} timesteps"
     )
-    if model_actions + random_actions > 0:
-        final_model_usage = model_actions / (model_actions + random_actions) * 100
-        print(
-            f"📈 Final action distribution: {final_model_usage:.1f}% model, {100-final_model_usage:.1f}% random"
-        )
 
     return trajectories
 
 
-def collect_and_train_periodically(
-    env, total_timesteps, model, save_dir, checkpoint_interval, args
-):
-    """Collect trajectories and train periodically with progressive model usage"""
-    print(
-        f"🎮 Starting periodic collection and training with PROGRESSIVE MODEL USAGE..."
-    )
-
-    all_trajectories = []
-    current_timesteps = 0
-    training_round = 0
-
-    # AGGRESSIVE model usage - start high, stay high
-    base_model_probability = 0.5  # Start with 50% instead of 20%
-    max_model_probability = 0.95  # End with 95%
-
-    while current_timesteps < total_timesteps:
-        remaining_steps = min(checkpoint_interval, total_timesteps - current_timesteps)
-        training_round += 1
-
-        # Calculate progressive model usage probability
-        progress = current_timesteps / total_timesteps
-        model_probability = (
-            base_model_probability
-            + (max_model_probability - base_model_probability) * progress
-        )
-
-        print(f"\n🔄 Training Round {training_round}")
-        print(f"   Collecting {remaining_steps:,} timesteps...")
-        print(f"   Model usage: {model_probability*100:.1f}% (progressive)")
-
-        # Collect trajectories with current model
-        batch_trajectories = collect_trajectories_with_model(
-            env,
-            remaining_steps,
-            model,
-            save_dir,
-            checkpoint_interval,
-            device="cuda",
-            use_model_probability=model_probability,
-            context_length=args.context_length,
-        )
-
-        # Add to overall collection
-        all_trajectories.extend(batch_trajectories)
-        current_timesteps += remaining_steps
-
-        # Memory management - EMERGENCY LIMITS
-        MAX_TOTAL_TRAJECTORIES = 20  # Reduced from 100 to 20
-        if len(all_trajectories) > MAX_TOTAL_TRAJECTORIES:
-            all_trajectories = all_trajectories[-MAX_TOTAL_TRAJECTORIES:]
-            print(
-                f"🧹 Total trajectory cleanup: keeping {len(all_trajectories)} trajectories"
-            )
-
-        # FORCE aggressive cleanup after each round
-        if len(all_trajectories) > 10:
-            all_trajectories = all_trajectories[-10:]
-            gc.collect()
-            torch.cuda.empty_cache()
-            print(f"🚨 FORCED cleanup: keeping {len(all_trajectories)} trajectories")
-
-        # Filter good trajectories for training
-        good_trajectories = [
-            t
-            for t in all_trajectories
-            if len(t["rewards"]) > 10 and sum(t["rewards"]) != 0
-        ]
-
-        if len(good_trajectories) < 5:
-            print("⚠️ Using all trajectories due to limited good data")
-            good_trajectories = all_trajectories
-
-        if len(good_trajectories) >= 2:
-            print(
-                f"🏋️ Training Decision Transformer with {len(good_trajectories)} trajectories..."
-            )
-
-            # Train the model
-            model = train_decision_transformer(
-                model=model,
-                trajectories=good_trajectories,
-                epochs=min(args.n_steps, 20),  # Limit epochs per training round
-                batch_size=args.batch_size,
-                lr=args.learning_rate,
-                device="cuda",
-                context_length=args.context_length,
-            )
-
-            # Mark model as trained
-            model._is_trained = True
-
-            # Save intermediate model
-            save_checkpoint(model, current_timesteps, save_dir)
-
-            # Clear CUDA cache
-            torch.cuda.empty_cache()
-            gc.collect()
-
-            print(f"✅ Round {training_round} complete - model improved!")
-        else:
-            print("⚠️ Not enough good trajectories for training yet")
-
-    return all_trajectories, model
-
-
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Samurai Showdown Agent - Progressive Model-Based Collection"
+        description="Train Samurai Showdown Agent - Single Run Collection and Training"
     )
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=10000000,  # Reduced from 10000000 for testing
+        default=1000000,
         help="Total timesteps to collect",
     )
     parser.add_argument(
         "--learning-rate", type=float, default=4e-4, help="Learning rate"
     )
+    parser.add_argument("--render", action="store_true", help="Enable rendering")
     parser.add_argument(
         "--resume", type=str, default=None, help="Resume from saved model path"
     )
-    parser.add_argument("--render", action="store_true", help="Enable rendering")
-    parser.add_argument(
-        "--use-default-state", action="store_true", help="Use default game state"
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=0, help="Batch size (0 for auto with cap)"
-    )
-    parser.add_argument("--n-steps", type=int, default=50, help="Training epochs")
-    parser.add_argument(
-        "--context-length",
-        type=int,
-        default=30,
-        help="Context length for Decision Transformer",
-    )
-    parser.add_argument(
-        "--checkpoint-interval",
-        type=int,
-        default=50000,  # Reduced from 100000 for more frequent checkpoints
-        help="Save checkpoint every N timesteps",
-    )
 
     args = parser.parse_args()
+
+    # Set good default values directly
+    use_default_state = False  # Use samurai.state file if available
+    batch_size = 32  # Good balance of memory usage and training stability
+    n_steps = 3  # Train for 3 epochs over entire dataset
+    context_length = 30  # Good context window for Decision Transformer
 
     # System check
     if not check_system_resources():
@@ -650,7 +232,7 @@ def main():
         return
 
     # Handle state
-    if args.use_default_state:
+    if use_default_state:
         state = None
         print(f"🎮 Using default game state")
     else:
@@ -666,17 +248,8 @@ def main():
     obs_shape = get_actual_observation_dims(game, state)
     print(f"✅ Observation shape: {obs_shape}")
 
-    # Calculate batch size
-    if args.batch_size == 0:
-        context_length = args.context_length
-        obs_memory_per_sample = (
-            context_length * obs_shape[0] * obs_shape[1] * obs_shape[2] * 4
-        )
-        available_memory = 10.4 * 1024 * 1024 * 1024  # 10.4GB
-        max_batch_size = int(available_memory / obs_memory_per_sample)
-        args.batch_size = min(256, max(8, max_batch_size))
-
-    print(f"🚀 Using batch size: {args.batch_size}")
+    # Use the set batch size
+    print(f"🚀 Using batch size: {batch_size}")
 
     # Setup directories
     save_dir = "trained_models"
@@ -734,31 +307,19 @@ def main():
     if args.resume and os.path.exists(args.resume):
         print(f"📂 Loading model from: {args.resume}")
 
-        if args.resume.endswith(".zip"):
-            import zipfile
-            import tempfile
-
-            with zipfile.ZipFile(args.resume, "r") as zip_ref:
-                pth_files = [f for f in zip_ref.namelist() if f.endswith(".pth")]
-                if not pth_files:
-                    print(f"❌ No .pth file found in zip")
-                    return
-
-                with tempfile.NamedTemporaryFile(
-                    suffix=".pth", delete=False
-                ) as temp_file:
-                    temp_file.write(zip_ref.read(pth_files[0]))
-                    temp_path = temp_file.name
+        if args.resume.endswith(".pkl"):
+            import pickle
 
             try:
-                model.load_state_dict(torch.load(temp_path, map_location=device))
+                with open(args.resume, "rb") as f:
+                    checkpoint_data = pickle.load(f)
+
+                model.load_state_dict(checkpoint_data["model_state_dict"])
                 model._is_trained = True  # Mark as trained
-                print(f"✅ Model loaded from .zip")
+                print(f"✅ Model loaded from .pkl")
             except Exception as e:
                 print(f"❌ Error loading: {e}")
                 return
-            finally:
-                os.unlink(temp_path)
         else:
             try:
                 model.load_state_dict(torch.load(args.resume, map_location=device))
@@ -774,19 +335,50 @@ def main():
     # Move model to GPU
     model.to(device)
 
-    # Start periodic training process with progressive model usage
-    print(
-        f"📊 Starting PROGRESSIVE training every {args.checkpoint_interval:,} timesteps..."
-    )
-    print(f"🎯 Model usage will increase from 50% to 95% over training")
+    # If resuming, use the model for inference instead of training
+    if args.resume and os.path.exists(args.resume):
+        temperature = (
+            0.7  # Good value for inference: slightly focused but still exploratory
+        )
+        print(f"🎮 Running inference with loaded model (temperature={temperature})...")
 
-    trajectories, trained_model = collect_and_train_periodically(
-        env, args.total_timesteps, model, save_dir, args.checkpoint_interval, args
+        # Quick inference test
+        obs, _ = env.reset()
+        for i in range(100):  # Run a few steps to test
+            # Prepare input for model
+            states = torch.from_numpy(obs).float().unsqueeze(0).unsqueeze(0) / 255.0
+            actions = torch.zeros(1, 1, dtype=torch.long)
+            returns_to_go = torch.zeros(1, 1, dtype=torch.float32)
+            timesteps = torch.zeros(1, 1, dtype=torch.long)
+
+            # Move to device
+            states = states.to(device)
+            actions = actions.to(device)
+            returns_to_go = returns_to_go.to(device)
+            timesteps = timesteps.to(device)
+
+            # Get action with temperature
+            action = model.get_action(
+                states, actions, returns_to_go, timesteps, temperature=temperature
+            )
+            obs, reward, done, truncated, _ = env.step(action)
+
+            if done or truncated:
+                obs, _ = env.reset()
+
+        print(f"✅ Inference test completed!")
+        env.close()
+        return
+
+    # Collect trajectories using random actions
+    print(f"📊 Starting trajectory collection...")
+    trajectories = collect_trajectories(
+        env, args.total_timesteps, device=device, context_length=context_length
     )
 
     print(f"✅ Collected {len(trajectories)} total trajectories")
 
-    # Final comprehensive training
+    # Filter good trajectories for training
     good_trajectories = [
         t for t in trajectories if len(t["rewards"]) > 10 and sum(t["rewards"]) != 0
     ]
@@ -797,31 +389,41 @@ def main():
         good_trajectories = trajectories
 
     if len(good_trajectories) >= 2:
-        print(f"🏋️ Final comprehensive training...")
+        print(f"🏋️ Training Decision Transformer...")
         trained_model = train_decision_transformer(
-            model=trained_model,
+            model=model,
             trajectories=good_trajectories,
-            epochs=args.n_steps,
-            batch_size=args.batch_size,
+            epochs=n_steps,
+            batch_size=batch_size,
             lr=args.learning_rate,
             device=device,
-            context_length=args.context_length,
+            context_length=context_length,
         )
 
-    # Save final model
-    import zipfile
+        # Save final model
+        import pickle
 
-    temp_model_path = "temp_final_model.pth"
-    torch.save(trained_model.state_dict(), temp_model_path)
+        final_checkpoint_data = {
+            "model_state_dict": trained_model.state_dict(),
+            "timesteps": args.total_timesteps,
+            "model_config": {
+                "observation_shape": trained_model.observation_shape,
+                "action_dim": trained_model.action_dim,
+                "hidden_size": trained_model.hidden_size,
+                "max_ep_len": trained_model.max_ep_len,
+            },
+        }
 
-    final_zip_path = os.path.join(save_dir, "decision_transformer_samurai_final.zip")
-    with zipfile.ZipFile(final_zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-        zipf.write(temp_model_path, "decision_transformer_samurai_final.pth")
+        final_pkl_path = os.path.join(
+            save_dir, "decision_transformer_samurai_final.pkl"
+        )
+        with open(final_pkl_path, "wb") as f:
+            pickle.dump(final_checkpoint_data, f)
 
-    os.remove(temp_model_path)
-
-    print(f"🎉 Training completed!")
-    print(f"💾 Final model saved to: {final_zip_path}")
+        print(f"🎉 Training completed!")
+        print(f"💾 Final model saved to: {final_pkl_path}")
+    else:
+        print("❌ Not enough good trajectories for training")
 
     # Memory usage summary
     if torch.cuda.is_available():

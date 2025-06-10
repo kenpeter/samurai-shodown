@@ -10,7 +10,7 @@ from torch.optim import AdamW
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Memory-optimized wrapper for Samurai Showdown training"""
+    """Simplified aggressive wrapper for Samurai Showdown training"""
 
     _global_stats = {
         "total_wins": 0,
@@ -39,6 +39,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.max_episode_steps = max_episode_steps
         self.episode_steps = 0
         self.reset_round = reset_round
+
+        # Aggression tracking
+        self.consecutive_attacks = 0
+        self.last_action = None
 
         # Environment tracking
         import random
@@ -81,9 +85,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.action_space = self.env.action_space
             self._original_action_space = self.env.action_space
 
-        print(f"🚀 {self.env_id} Memory-Optimized Wrapper")
-        print(f"   🎯 Rewards: +1 Win, -1 Loss, 0 everything else")
+        print(f"🚀 {self.env_id} Simplified Aggressive Wrapper")
+        print(f"   🎯 Simple rewards: Win/Loss terminal, damage/aggression continuous")
         print(f"   📏 Episode length: {max_episode_steps} steps")
+        print(f"   🔥 Anti-fire knife evasion enabled")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB to grayscale and resize"""
@@ -145,44 +150,65 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health, action=None):
-        """Ultra-aggressive reward system"""
+        """SIMPLIFIED: All rewards calculated here"""
         reward = 0.0
         done = False
 
-        # MASSIVE ATTACK BONUS
-        attack_bonus = 0.0
+        # 1. ATTACK BONUS - Encourage aggression
         if action is not None:
-            attack_actions = [8, 9, 10, 11]  # Adjust based on your game
+            attack_actions = [8, 9, 10, 11]  # Main attack buttons
+            defensive_actions = [4, 5, 6, 7]  # Block/defensive moves
+            movement_actions = [0, 1, 2, 3]  # Movement/jump
+
             if action in attack_actions:
-                attack_bonus = 0.5  # HUGE bonus for attacking!
+                # Big bonus for attacking
+                reward += 0.3
+                self.consecutive_attacks += 1
+                # Combo bonus: reward sustained aggression
+                combo_bonus = min(self.consecutive_attacks * 0.1, 0.5)
+                reward += combo_bonus
+            elif action in defensive_actions:
+                # Small penalty for defensive play
+                reward -= 0.1
+                self.consecutive_attacks = 0
+            elif action in movement_actions:
+                # Neutral for movement, but break attack combo
+                self.consecutive_attacks = 0
 
-            # PENALTY for defensive actions
-            defensive_actions = [4, 5, 6, 7]  # Blocking/defensive moves
-            if action in defensive_actions:
-                attack_bonus = -0.2  # Penalty for being defensive!
-
-        # MASSIVE damage rewards
+        # 2. DAMAGE REWARDS - Big rewards for dealing damage
         damage_reward = 0.0
         if hasattr(self, "prev_opponent_health"):
             if curr_opponent_health < self.prev_opponent_health:
                 damage_dealt = self.prev_opponent_health - curr_opponent_health
-                damage_reward = damage_dealt * 0.1  # 10x bigger than before!
-                # print(f"💥 DAMAGE DEALT: {damage_dealt} → +{damage_reward:.2f} reward!")
+                damage_reward = damage_dealt * 0.05  # 5 points per HP damage
+                reward += damage_reward
 
-        # PENALTY for taking damage (encourage better attacking)
+        # 3. DAMAGE PENALTY - Discourage taking damage
         damage_penalty = 0.0
         if hasattr(self, "prev_player_health"):
             if curr_player_health < self.prev_player_health:
                 damage_taken = self.prev_player_health - curr_player_health
-                damage_penalty = -damage_taken * 0.05  # Penalty for taking damage
+                damage_penalty = damage_taken * 0.02  # Small penalty for taking damage
+                reward -= damage_penalty
 
-        # Check for round end
+        # 4. FIRE KNIFE EVASION - Detect and reward avoiding big attacks
+        # Look for sudden large damage spikes (fire knife does big damage)
+        if hasattr(self, "prev_player_health"):
+            damage_taken = self.prev_player_health - curr_player_health
+            if damage_taken >= 20:  # Fire knife does significant damage
+                # Extra penalty for getting hit by special attacks
+                reward -= 0.5
+            elif damage_taken == 0 and action in [1, 3]:  # Moved away successfully
+                # Small bonus for evasive movement when not taking damage
+                reward += 0.1
+
+        # 5. TERMINAL REWARDS - Simple win/loss
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                # WIN - HUGE BONUS
+                # WIN - Big reward
                 self.wins += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_wins"] += 1
@@ -193,24 +219,28 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     "total_rounds"
                 ] = self.total_rounds
 
+                # Dominance bonus: extra reward for winning with high health
+                health_ratio = curr_player_health / self.full_hp
+                dominance_bonus = health_ratio * 0.5  # Up to +0.5 for perfect wins
+
+                # Quick finish bonus: reward fast victories
+                if self.episode_steps < 1000:
+                    quick_bonus = 0.3
+                else:
+                    quick_bonus = 0.0
+
+                total_win_reward = 2.0 + dominance_bonus + quick_bonus
+                reward += total_win_reward
+
                 print(
-                    f"🏆 {self.env_id} WIN! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                    f"🏆 {self.env_id} WIN! Health: {curr_player_health}/{self.full_hp} "
+                    f"Reward: +{total_win_reward:.2f} ({self.wins}W/{self.losses}L - {win_rate:.1%})"
                 )
 
-                # Base win reward
-                reward = 2.0  # DOUBLED from 1.0!
-
-                # DOMINANCE BONUS: Extra reward for winning with high health
-                health_dominance = curr_player_health / self.full_hp
-                dominance_bonus = health_dominance * 1.0  # Up to +1.0 for perfect wins
-                reward += dominance_bonus
-
-                self.prev_player_health = curr_player_health
-                self.prev_opponent_health = curr_opponent_health
-                return reward + attack_bonus + damage_reward + damage_penalty, True
+                done = True
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                # LOSS - BIG PENALTY
+                # LOSS - Big penalty
                 self.losses += 1
                 win_rate = self.wins / self.total_rounds
                 SamuraiShowdownCustomWrapper._global_stats["total_losses"] += 1
@@ -221,24 +251,26 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     "total_rounds"
                 ] = self.total_rounds
 
+                reward -= 2.0  # Simple loss penalty
+
                 print(
-                    f"💀 {self.env_id} LOSS! {self.wins}W/{self.losses}L ({win_rate:.1%})"
+                    f"💀 {self.env_id} LOSS! ({self.wins}W/{self.losses}L - {win_rate:.1%})"
                 )
-                reward = -2.0  # DOUBLED penalty!
-                self.prev_player_health = curr_player_health
-                self.prev_opponent_health = curr_opponent_health
-                return reward + attack_bonus + damage_reward + damage_penalty, True
+                done = True
 
             if self.reset_round:
                 done = True
+
             self._log_periodic_stats()
 
+        # Update health tracking
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
 
-        # Return continuous rewards during gameplay
-        total_reward = attack_bonus + damage_reward + damage_penalty
-        return total_reward, done
+        # Clamp reward to reasonable bounds
+        reward = np.clip(reward, -3.0, 3.0)
+
+        return reward, done
 
     def reset(self, **kwargs):
         """Reset environment"""
@@ -252,6 +284,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
+        self.consecutive_attacks = 0
 
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
@@ -269,7 +302,22 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         attack_actions = [8, 9, 10, 11]
         defensive_actions = [4, 5, 6, 7]
 
-        # 60% chance to force attack instead of defense
+        # FIRE KNIFE EVASION: If we detect potential incoming fire knife
+        # (this would need game-specific detection, for now use heuristics)
+        # Force evasive movement occasionally
+        if np.random.random() < 0.1:  # 10% chance to evade
+            evasive_actions = [1, 3]  # Left/right movement
+            return np.random.choice(evasive_actions)
+
+        # FORCE AGGRESSION: 40% chance to force attack
+        if np.random.random() < 0.4:
+            return np.random.choice(attack_actions)
+
+        # Reduce jumping (often action 0)
+        if action == 0 and np.random.random() > 0.1:
+            return np.random.choice(attack_actions)
+
+        # Replace blocking with attacks 60% of the time
         if action in defensive_actions and np.random.random() < 0.6:
             return np.random.choice(attack_actions)
 
@@ -280,7 +328,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return action
 
     def step(self, action):
-        """Step with proper action handling"""
+        """Simplified step with all rewards in _calculate_reward"""
         # Convert action to proper format
         try:
             if hasattr(action, "shape") and action.shape == ():
@@ -294,6 +342,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError, TypeError):
             action_int = 0
 
+        # Apply aggression bias
         action_int = self._bias_action_toward_attacks(action_int)
 
         # Convert for MultiBinary action space
@@ -332,16 +381,18 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 observation, reward, done, info = result
                 truncated = False
 
+        # Extract health and calculate ALL rewards in one place
         curr_player_health, curr_opponent_health = self._extract_health(info)
 
-        # PASS THE ACTION to reward calculation
-        custom_reward, custom_done = self._calculate_reward(
+        # ALL REWARDS CALCULATED HERE
+        total_reward, custom_done = self._calculate_reward(
             curr_player_health, curr_opponent_health, action_int
         )
 
         if custom_done:
             done = custom_done
 
+        # Process frame
         processed_frame = self._process_frame(observation)
         self.frame_stack.append(processed_frame)
         stacked_obs = self._stack_observation()
@@ -350,28 +401,23 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         if self.episode_steps >= self.max_episode_steps:
             truncated = True
 
-        return stacked_obs, custom_reward, done, truncated, info
+        # Store last action for combo tracking
+        self.last_action = action_int
+
+        return stacked_obs, total_reward, done, truncated, info
 
 
-# decision transformer, nn.module to inherit
+# Keep the existing DecisionTransformer and training classes unchanged
 class DecisionTransformer(nn.Module):
     """Decision Transformer for Samurai Showdown"""
 
     def __init__(
-        # self
         self,
-        # obs shape
         observation_shape,
-        # action dim
         action_dim,
-        # each hidden layer has 256 neurons
         hidden_size=256,
-        # 4 hidden layer
-        # each layer is multi head + forward
         n_layer=4,
-        # 4 head
         n_head=4,
-        # max ep len
         max_ep_len=2000,
     ):
         super().__init__()
@@ -382,9 +428,7 @@ class DecisionTransformer(nn.Module):
 
         # CNN encoder
         self.cnn_encoder = nn.Sequential(
-            # 9 frame with resize height and width; 32 fature map. 8x8 filter size; stride move 4 at a time
             nn.Conv2d(observation_shape[0], 32, kernel_size=8, stride=4, padding=2),
-            # move in place less mem
             nn.ReLU(inplace=True),
             nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
             nn.ReLU(inplace=True),
@@ -454,12 +498,8 @@ class DecisionTransformer(nn.Module):
         stacked_inputs = stacked_inputs.view(batch_size, 3 * seq_len, self.hidden_size)
 
         # Apply transformer
-
-        # rtg, state, action get normalized
         stacked_inputs = self.ln(stacked_inputs)
-        # rtg, state, action drop
         stacked_inputs = self.dropout(stacked_inputs)
-        # after all good. rtg, state, action go to transformer
         transformer_outputs = self.transformer(stacked_inputs)
 
         # Extract action predictions
@@ -469,7 +509,7 @@ class DecisionTransformer(nn.Module):
         return action_logits
 
     def get_action(self, states, actions, returns_to_go, timesteps, temperature=1.0):
-        """Get action for inference"""
+        """Get action for inference with temperature control"""
         self.eval()
         with torch.no_grad():
             logits = self.forward(states, actions, returns_to_go, timesteps)
@@ -584,17 +624,13 @@ def train_decision_transformer(
 
     dataset = TrajectoryDataset(trajectories, context_length)
 
-    # single worker
-    # data loader??
     dataloader = DataLoader(
-        # data set
         dataset,
-        # batch size
         batch_size=batch_size,
         shuffle=True,
         pin_memory=True,
-        num_workers=1,  # REDUCED from 4 to 1
-        persistent_workers=False,  # DISABLED for memory
+        num_workers=1,
+        persistent_workers=False,
     )
 
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=1e-4, betas=(0.9, 0.95))
@@ -606,11 +642,10 @@ def train_decision_transformer(
     print(f"🚀 Training Decision Transformer:")
     print(f"   Device: {device}")
     print(f"   Epochs: {epochs}")
-    print(f"   Batch size: {batch_size} (CAPPED)")
+    print(f"   Batch size: {batch_size}")
     print(f"   Learning rate: {lr}")
     print(f"   Context length: {context_length}")
     print(f"   Dataset size: {len(dataset)}")
-    print(f"   Workers: 1 (MEMORY OPTIMIZED)")
 
     scaler = torch.cuda.amp.GradScaler()
     best_loss = float("inf")
