@@ -8,7 +8,7 @@ python train.py --resume trained_models_samurai_cuda/ppo_samurai_cuda_massive_fi
 
 
 
-python train.py --render --total-timesteps 10000000 --num-envs 12
+python train.py --render --total-timesteps 100000000
 
 
 

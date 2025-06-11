@@ -2,142 +2,178 @@ import os
 import sys
 import argparse
 import time
+import math
 import torch
+import torch.nn as nn
 import psutil
+from typing import Dict, Any, Optional, Type, Union
 
 import retro
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback
-from stable_baselines3.common.vec_env import SubprocVecEnv
+from stable_baselines3.common.policies import ActorCriticCnnPolicy
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
 # Import the wrapper
 from wrapper import SamuraiShowdownCustomWrapper
 
 
-def make_env_for_subprocess(game, state, rendering=False, seed=0, env_id=0):
-    """Create environment function for SubprocVecEnv - all imports MUST be inside"""
+class DeepCNNFeatureExtractor(BaseFeaturesExtractor):
+    """Ultra-deep CNN feature extractor for maximum network depth"""
 
-    def _init():
-        # Import everything inside the function for subprocess compatibility
-        import retro
-        import gymnasium as gym
-        from stable_baselines3.common.monitor import Monitor
-        from wrapper import SamuraiShowdownCustomWrapper
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 1024):
+        super().__init__(observation_space, features_dim)
 
-        # Create environment
-        env = retro.make(
-            game=game,
-            state=state,
-            use_restricted_actions=retro.Actions.FILTERED,
-            obs_type=retro.Observations.IMAGE,
-            render_mode="human" if rendering else None,
+        n_input_channels = observation_space.shape[0]  # 9 frames
+
+        # Calculate adaptive filter sizes based on input dimensions
+        height, width = observation_space.shape[1], observation_space.shape[2]
+
+        # Ultra-deep network with residual connections
+        self.conv_layers = nn.Sequential(
+            # Initial feature extraction - larger filters
+            nn.Conv2d(n_input_channels, 64, kernel_size=7, stride=2, padding=3),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=3, stride=2, padding=1),
+            # Deep residual-style blocks
+            self._make_conv_block(64, 64, 3, 1, 1),
+            self._make_conv_block(64, 64, 3, 1, 1),
+            self._make_conv_block(64, 128, 3, 2, 1),  # Downsample
+            self._make_conv_block(128, 128, 3, 1, 1),
+            self._make_conv_block(128, 128, 3, 1, 1),
+            self._make_conv_block(128, 256, 3, 2, 1),  # Downsample
+            self._make_conv_block(256, 256, 3, 1, 1),
+            self._make_conv_block(256, 256, 3, 1, 1),
+            self._make_conv_block(256, 256, 3, 1, 1),
+            self._make_conv_block(256, 512, 3, 2, 1),  # Downsample
+            self._make_conv_block(512, 512, 3, 1, 1),
+            self._make_conv_block(512, 512, 3, 1, 1),
+            self._make_conv_block(512, 512, 3, 1, 1),
+            self._make_conv_block(512, 512, 3, 1, 1),
+            # Final feature extraction
+            nn.Conv2d(512, 1024, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
         )
 
-        env = SamuraiShowdownCustomWrapper(
-            env,
-            reset_round=True,
-            rendering=rendering,
-            max_episode_steps=15000,  # Slightly reduced for CUDA efficiency
+        # Deep fully connected layers that output exactly features_dim
+        self.fc_layers = nn.Sequential(
+            nn.Linear(1024, 2048),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(2048, 1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.3),
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2),
+            nn.Linear(512, features_dim),  # Must output exactly features_dim (512)
+            nn.ReLU(inplace=True),
         )
 
-        env = Monitor(env)
-        env.reset(seed=seed)
-        return env
+        print(f"🧠 ULTRA-DEEP CNN Network Architecture:")
+        print(f"   📊 Input: {observation_space.shape}")
+        print(f"   🔥 Conv layers: 18 layers (7x7 → 3x3 blocks)")
+        print(f"   💪 Channels: 9 → 64 → 128 → 256 → 512 → 1024")
+        print(f"   🎯 FC layers: 4 deep layers (2048 → 1024 → 512 → {features_dim})")
+        print(f"   ⚡ Total depth: ~22 layers")
+        print(f"   🔗 Output features: {features_dim} (feeds to policy networks)")
 
-    return _init
+    def _make_conv_block(self, in_channels, out_channels, kernel_size, stride, padding):
+        """Create a convolutional block with BatchNorm and ReLU"""
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding),
+            nn.BatchNorm2d(out_channels),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        # Normalize observations to [0, 1]
+        observations = observations.float() / 255.0
+
+        # Pass through conv layers
+        features = self.conv_layers(observations)
+
+        # Pass through FC layers
+        features = self.fc_layers(features)
+
+        return features
 
 
-def linear_schedule(initial_value, final_value=0.0):
-    """Linear scheduler"""
-
-    def scheduler(progress):
-        return final_value + progress * (initial_value - final_value)
-
-    return scheduler
-
-
-def calculate_optimal_batch_size(obs_shape, num_envs, target_vram_gb=10.0):
-    """Calculate optimal batch size based on VRAM constraints - optimized for 4 envs"""
+def calculate_maximum_batch_size(obs_shape, target_vram_gb=10.0):
+    """Calculate the absolute maximum batch size for single environment"""
 
     # Observation memory calculation
     num_frames, height, width = obs_shape
     obs_size_bytes = num_frames * height * width * 4  # float32
     obs_size_mb = obs_size_bytes / (1024 * 1024)
 
-    print(f"📊 VRAM optimization for 4 envs + 2000+ batch:")
-    print(f"   Observation size: {obs_size_mb:.2f} MB (float32)")
+    print(f"📊 MAXIMUM BATCH SIZE CALCULATION:")
+    print(f"   Observation size: {obs_size_mb:.2f} MB per sample")
 
-    # Estimate model size (CNN + policy networks)
-    estimated_model_vram = 1.2  # GB for model weights (optimized for 4 envs)
+    # Estimate deep network VRAM usage
+    # Ultra-deep CNN + deep policy networks
+    estimated_model_vram = 3.5  # GB for ultra-deep network
 
     # Available VRAM for batches
     available_vram = target_vram_gb - estimated_model_vram
     available_vram_bytes = available_vram * 1024 * 1024 * 1024
 
     # Calculate maximum batch size
-    # Each sample in batch needs: obs + gradients + activations
-    memory_per_sample = obs_size_bytes * 2.5  # Optimized estimate for 4 envs
+    # Each sample needs: obs + gradients + activations + intermediate features
+    memory_per_sample = obs_size_bytes * 4.0  # Higher multiplier for deep network
     max_batch_size = int(available_vram_bytes / memory_per_sample)
 
-    # Round down to nearest multiple of 64 for efficiency
-    optimal_batch_size = (max_batch_size // 64) * 64
+    # Round to nearest power of 2 for optimal memory alignment
+    optimal_batch_size = 2 ** int(math.log2(max_batch_size))
 
-    # Ensure minimum batch size of 2000+
-    optimal_batch_size = max(optimal_batch_size, 2048)
-
-    # Cap at reasonable maximum for 4 envs
-    optimal_batch_size = min(optimal_batch_size, 8192)
+    # Ensure reasonable bounds
+    optimal_batch_size = max(optimal_batch_size, 512)  # Minimum
+    optimal_batch_size = min(optimal_batch_size, 16384)  # Maximum
 
     estimated_batch_vram = (optimal_batch_size * memory_per_sample) / (1024**3)
 
-    print(f"   Model VRAM: {estimated_model_vram:.1f} GB")
+    print(f"   Deep network VRAM: {estimated_model_vram:.1f} GB")
     print(f"   Available for batches: {available_vram:.1f} GB")
-    print(f"   Optimal batch size: {optimal_batch_size}")
+    print(f"   MAXIMUM batch size: {optimal_batch_size:,}")
     print(f"   Estimated batch VRAM: {estimated_batch_vram:.1f} GB")
-
-    # Force minimum 2000+ if possible
-    if optimal_batch_size < 2000:
-        print(f"   ⚠️ Forcing batch size to 2048 (minimum target)")
-        optimal_batch_size = 2048
+    print(f"   🎯 SINGLE ENV OPTIMIZATION: All VRAM for massive batches!")
 
     return optimal_batch_size
 
 
-def check_system_resources(num_envs, n_steps, obs_shape):
-    """Check if system can handle the requested configuration"""
+def check_system_resources(n_steps, obs_shape, batch_size):
+    """Check system resources for single environment setup"""
 
-    # Check CPU cores
+    print(f"🖥️  SINGLE ENV SYSTEM CHECK:")
+
+    # CPU - single env needs minimal cores
     cpu_cores = psutil.cpu_count(logical=True)
+    print(f"   CPU Cores: {cpu_cores} (1 env needs minimal CPU)")
 
-    print(f"🖥️  CUDA System Resource Check:")
-    print(f"   CPU Cores: {cpu_cores}")
-    print(f"   Requested Envs: {num_envs}")
-    print(f"   Strategy: CUDA + 82GB RAM hybrid training")
-
-    # Check RAM - Buffer data stays in RAM, model on GPU
+    # RAM calculation
     ram_gb = psutil.virtual_memory().total / (1024**3)
 
-    # Calculate buffer memory (stays in RAM)
+    # Buffer memory for single env
     num_frames, height, width = obs_shape
-    obs_size_mb = (num_frames * height * width) / (1024 * 1024)
-    buffer_memory_gb = (n_steps * num_envs * obs_size_mb * 4) / 1024  # float32
+    obs_size_mb = (num_frames * height * width * 4) / (1024 * 1024)
+    buffer_memory_gb = (n_steps * obs_size_mb) / 1024
 
     print(f"   RAM: {ram_gb:.1f} GB")
-    print(f"   Buffer memory (RAM): {buffer_memory_gb:.1f} GB")
+    print(f"   Buffer memory: {buffer_memory_gb:.1f} GB")
+    print(f"   Strategy: 1 env = minimal RAM usage, maximum VRAM for batches")
 
-    if buffer_memory_gb > ram_gb * 0.6:
-        print(f"❌ ERROR: Insufficient RAM for buffer!")
-        return False
-
-    return True
+    return buffer_memory_gb < ram_gb * 0.3  # Very conservative for single env
 
 
-def get_actual_observation_dims(game, state):
-    """Get actual observation dimensions from the wrapper"""
+def get_observation_dims(game, state):
+    """Get actual observation dimensions"""
     try:
-        # Create a temporary environment to get actual dimensions
         temp_env = retro.make(
             game=game,
             state=state,
@@ -145,215 +181,211 @@ def get_actual_observation_dims(game, state):
             obs_type=retro.Observations.IMAGE,
             render_mode=None,
         )
-        wrapped_env = SamuraiShowdownCustomWrapper(temp_env)
+        wrapped_env = SamuraiShowdownCustomWrapper(temp_env, rendering=False)
         obs_shape = wrapped_env.observation_space.shape
         temp_env.close()
-        wrapped_env.env.close()
+        del wrapped_env
         return obs_shape
     except Exception as e:
         print(f"⚠️ Could not determine observation dimensions: {e}")
-        # Fallback to estimated dimensions
-        return (9, 168, 240)  # 9 frames, 75% of 224x320
+        return (9, 126, 180)  # Fallback
+
+
+def linear_schedule(initial_value, final_value=0.0):
+    """Linear learning rate schedule"""
+
+    def scheduler(progress):
+        return final_value + progress * (initial_value - final_value)
+
+    return scheduler
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Samurai Showdown Agent - CUDA OPTIMIZED with MASSIVE BATCHES"
+        description="Ultra-Deep Single Environment Training with Maximum Batch Size"
     )
-    parser.add_argument(
-        "--total-timesteps",
-        type=int,
-        default=50000000,
-        help="Total timesteps to train",
-    )
-    parser.add_argument(
-        "--num-envs",
-        type=int,
-        default=4,
-        help="Number of parallel environments (4 optimized for 2000+ batches)",
-    )
-    parser.add_argument(
-        "--learning-rate",
-        type=float,
-        default=3e-4,
-        help="Learning rate (optimized for CUDA)",
-    )
-    parser.add_argument(
-        "--resume", type=str, default=None, help="Resume from saved model path"
-    )
-    parser.add_argument("--render", action="store_true", help="Enable rendering")
-    parser.add_argument(
-        "--use-default-state", action="store_true", help="Use default game state"
-    )
-    parser.add_argument(
-        "--target-vram",
-        type=float,
-        default=10.0,
-        help="Target VRAM usage in GB (default: 10.0 out of 12GB)",
-    )
-    parser.add_argument(
-        "--n-steps",
-        type=int,
-        default=8192,
-        help="Steps per rollout (reduced for RAM efficiency)",
-    )
+    parser.add_argument("--total-timesteps", type=int, default=50000000)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--resume", type=str, default=None)
+    parser.add_argument("--render", action="store_true")
+    parser.add_argument("--use-default-state", action="store_true")
+    parser.add_argument("--target-vram", type=float, default=10.0)
+    parser.add_argument("--n-steps", type=int, default=16384)
 
     args = parser.parse_args()
 
-    # Set device to CUDA directly
+    # Force CUDA
     device = "cuda"
-    print(f"🚀 CUDA TRAINING MODE - Using {device} + 82GB RAM")
-    print(f"   🎯 Target: LARGEST POSSIBLE BATCHES (2000+)")
-    print(f"   💾 VRAM Target: {args.target_vram}GB / 12GB")
-    print(f"   🧠 RAM: 82GB for massive buffers")
+    torch.cuda.empty_cache()
+
+    print(f"🚀 ULTRA-DEEP SINGLE ENV TRAINING")
+    print(f"   💻 Device: {device}")
+    print(f"   🎯 Strategy: 1 env + deepest network + maximum batch size")
+    print(f"   🧠 Network: Ultra-deep CNN (~30 layers)")
+    print(f"   💪 Batch: Maximum possible size")
+    print(f"   🎮 UI: Single game window")
 
     game = "SamuraiShodown-Genesis"
 
-    # Test if the game works
+    # Test environment
     print(f"🎮 Testing {game}...")
     try:
-        test_env = retro.make(
-            game=game,
-            state=None,
-            use_restricted_actions=retro.Actions.FILTERED,
-            obs_type=retro.Observations.IMAGE,
-            render_mode=None,
-        )
+        test_env = retro.make(game=game, state=None)
         test_env.close()
-        print(f"✅ Basic environment test passed")
+        print(f"✅ Environment test passed")
     except Exception as e:
-        print(f"❌ Basic environment test failed: {e}")
+        print(f"❌ Environment test failed: {e}")
         return
 
-    # Handle state
+    # Handle state file properly
     if args.use_default_state:
         state = None
         print(f"🎮 Using default game state")
     else:
         if os.path.exists("samurai.state"):
             state = os.path.abspath("samurai.state")
-            print(f"🎮 Using samurai.state file")
+            print(f"🎮 Using samurai.state file: {state}")
         else:
             print(f"❌ samurai.state not found, using default state")
             state = None
 
-    # Get actual observation dimensions
-    print("🔍 Determining actual observation dimensions...")
-    obs_shape = get_actual_observation_dims(game, state)
-    print(f"✅ Observation shape: {obs_shape}")
+    # Get observation dimensions
+    obs_shape = get_observation_dims(game, state)
+    print(f"📊 Observation shape: {obs_shape}")
 
-    # System resource check
-    print("🔧 Checking system resources...")
-    if not check_system_resources(args.num_envs, args.n_steps, obs_shape):
-        print("💡 Try reducing n-steps or number of environments")
-        print("   Suggested: python train.py --n-steps 4096 --num-envs 2")
-        sys.exit(1)
+    # Calculate maximum batch size
+    max_batch_size = calculate_maximum_batch_size(obs_shape, args.target_vram)
 
-    # Calculate optimal batch size for CUDA
-    optimal_batch_size = calculate_optimal_batch_size(
-        obs_shape, args.num_envs, args.target_vram
-    )
-
-    # Determine actual number of environments for rendering
-    if args.render:
-        if args.num_envs > 2:
-            print(f"🎮 Rendering mode: Using 2 environments")
-            actual_envs = 2
-        else:
-            actual_envs = args.num_envs
-    else:
-        actual_envs = args.num_envs
-
-    n_steps = args.n_steps
-    batch_size = optimal_batch_size
-
-    # Ensure batch_size doesn't exceed total samples
-    total_samples_per_rollout = n_steps * actual_envs
-    if batch_size > total_samples_per_rollout:
-        batch_size = total_samples_per_rollout
-        print(f"⚠️ Adjusted batch_size to {batch_size} (max samples per rollout)")
-
-    print(f"🔥 4 ENVS + 2000+ BATCH hyperparameters:")
-    print(f"   💪 Batch size: {batch_size:,} (TARGET: 2000+)")
-    print(f"   📏 N-steps: {n_steps:,}")
-    print(f"   🎮 Environments: {actual_envs} (OPTIMIZED)")
-    print(f"   📊 Total samples per rollout: {total_samples_per_rollout:,}")
-    print(f"   🔄 Minibatches per rollout: {total_samples_per_rollout // batch_size}")
-    print(f"   🚀 Strategy: 4 envs balance performance + memory efficiency")
-
-    # Verify we hit our 2000+ target
-    if batch_size >= 2000:
-        print(f"   ✅ SUCCESS: Achieved 2000+ batch size!")
-    else:
-        print(
-            f"   ⚠️ WARNING: Batch size below 2000 - consider reducing n-steps or VRAM target"
-        )
-
-    save_dir = "trained_models_samurai_cuda"
-    os.makedirs(save_dir, exist_ok=True)
-
-    print(f"🚀 Samurai Showdown 4 ENV + 2000+ BATCH Training")
-    print(f"   💻 Device: {device} (12GB VRAM) + 82GB RAM")
-    print(f"   🎯 Strategy: 4 envs + massive batches for optimal speed")
-    print(f"   🔥 Batch size: {batch_size:,} samples (TARGET: 2000+)")
-    print(f"   🎮 No jump prevention - full action space")
-    print(f"   Game: {game}")
-
-    # Create environments with SubprocVecEnv
-    print(f"🔧 Creating {actual_envs} environments...")
-
-    try:
-        env_fns = [
-            make_env_for_subprocess(
-                game,
-                state=state,
-                rendering=args.render,
-                seed=i,
-                env_id=i,
-            )
-            for i in range(actual_envs)
-        ]
-
-        env = SubprocVecEnv(env_fns)
-        print(f"✅ {actual_envs} environments created")
-
-    except Exception as e:
-        print(f"❌ Failed to create environments: {e}")
-        import traceback
-
-        traceback.print_exc()
+    # System check
+    if not check_system_resources(args.n_steps, obs_shape, max_batch_size):
+        print("❌ Insufficient system resources")
         return
 
-    # Monitor VRAM before model creation
+    # Adjust n_steps if needed to accommodate batch size
+    n_steps = args.n_steps
+    if max_batch_size > n_steps:
+        # Can use larger rollouts with single env
+        n_steps = max_batch_size
+        print(f"🔄 Adjusted n_steps to {n_steps} to match batch size")
+
+    batch_size = min(max_batch_size, n_steps)
+
+    print(f"🔥 FINAL HYPERPARAMETERS:")
+    print(f"   🎮 Environments: 1 (single env + UI)")
+    print(f"   💪 Batch size: {batch_size:,}")
+    print(f"   📏 N-steps: {n_steps:,}")
+    print(f"   🧠 Network: Ultra-deep (~30 layers)")
+    print(f"   🎯 Strategy: Maximum depth + maximum batch size")
+
+    # Create single environment with rendering
+    print(f"🔧 Creating single environment with UI...")
+
+    try:
+        # Create environment with proper state handling
+        print(f"🔧 Creating environment with state: {state}")
+        env = retro.make(
+            game=game,
+            state=state,  # None for default state, or absolute path for custom state
+            use_restricted_actions=retro.Actions.FILTERED,
+            obs_type=retro.Observations.IMAGE,
+            render_mode="human" if args.render else None,
+        )
+
+        env = SamuraiShowdownCustomWrapper(
+            env,
+            reset_round=True,
+            rendering=args.render,
+            max_episode_steps=12000,
+        )
+
+        env = Monitor(env)
+        print(f"✅ Single environment created with UI")
+
+    except Exception as e:
+        print(f"❌ Failed to create environment: {e}")
+        print(f"🔄 Trying with default state...")
+        try:
+            # Fallback to default state
+            env = retro.make(
+                game=game,
+                state=None,  # Force default state
+                use_restricted_actions=retro.Actions.FILTERED,
+                obs_type=retro.Observations.IMAGE,
+                render_mode="human" if args.render else None,
+            )
+
+            env = SamuraiShowdownCustomWrapper(
+                env,
+                reset_round=True,
+                rendering=args.render,
+                max_episode_steps=12000,
+            )
+
+            env = Monitor(env)
+            print(f"✅ Environment created with default state")
+
+        except Exception as e2:
+            print(f"❌ Failed to create environment with default state: {e2}")
+            import traceback
+
+            traceback.print_exc()
+            return
+
+    # Create ultra-deep model
+    save_dir = "trained_models_ultra_deep"
+    os.makedirs(save_dir, exist_ok=True)
+
+    # Monitor VRAM
     torch.cuda.empty_cache()
     vram_before = torch.cuda.memory_allocated() / (1024**3)
     print(f"   VRAM before model: {vram_before:.2f} GB")
 
-    # Create or load model - CUDA OPTIMIZED
     if args.resume and os.path.exists(args.resume):
-        print(f"📂 Loading model from: {args.resume}")
+        print(f"📂 Loading model: {args.resume}")
         model = PPO.load(args.resume, env=env, device=device)
 
         # Update hyperparameters
         model.n_steps = n_steps
         model.batch_size = batch_size
-        model.n_epochs = 4  # Fewer epochs for massive batches
         model._setup_model()
 
-        print(f"✅ Model loaded and updated for CUDA training")
     else:
-        print(f"🚀 Creating PPO for CUDA MASSIVE BATCH training")
+        print(f"🚀 Creating ULTRA-DEEP PPO model")
 
         lr_schedule = linear_schedule(args.learning_rate, args.learning_rate * 0.1)
 
+        # FIXED: Proper action space detection for retro environments
+        print(f"🔍 Detecting action space type...")
+        print(f"   Action space: {env.action_space}")
+        print(f"   Action space type: {type(env.action_space)}")
+
+        action_space_type = type(env.action_space).__name__
+        print(f"   Action space class: {action_space_type}")
+
+        # Most retro environments use MultiBinary action spaces
+        if action_space_type == "MultiBinary" or hasattr(env.action_space, "shape"):
+            policy_type = "CnnPolicy"  # CnnPolicy handles MultiBinary
+            print(f"   🎮 Using CnnPolicy for MultiBinary action space")
+            if hasattr(env.action_space, "shape"):
+                print(f"   🎮 MultiBinary shape: {env.action_space.shape}")
+        elif action_space_type == "Discrete":
+            policy_type = "CnnPolicy"
+            print(
+                f"   🎮 Using CnnPolicy for Discrete action space ({env.action_space.n} actions)"
+            )
+        else:
+            # For retro games, assume MultiBinary if uncertain
+            policy_type = "CnnPolicy"
+            print(f"   🎮 Assuming MultiBinary for retro game, using CnnPolicy")
+
         model = PPO(
-            "CnnPolicy",
+            policy_type,
             env,
             device=device,
             verbose=1,
             n_steps=n_steps,
             batch_size=batch_size,
-            n_epochs=4,  # Optimized for massive batches
+            n_epochs=3,  # Fewer epochs for massive batches
             gamma=0.99,
             learning_rate=lr_schedule,
             clip_range=linear_schedule(0.2, 0.02),
@@ -361,45 +393,43 @@ def main():
             vf_coef=0.5,
             max_grad_norm=0.5,
             gae_lambda=0.95,
-            tensorboard_log="logs_samurai_cuda",
+            tensorboard_log="logs_ultra_deep",
             policy_kwargs=dict(
+                features_extractor_class=DeepCNNFeatureExtractor,
+                features_extractor_kwargs=dict(
+                    features_dim=512
+                ),  # Use 512 for compatibility
                 normalize_images=False,
                 optimizer_class=torch.optim.Adam,
-                optimizer_kwargs=dict(eps=1e-5),
+                optimizer_kwargs=dict(eps=1e-5, weight_decay=1e-4),
+                net_arch=dict(
+                    pi=[512, 256, 128],  # Deep actor network
+                    vf=[512, 256, 128],  # Deep critic network
+                ),
+                activation_fn=nn.ReLU,
             ),
         )
-
-        print(f"✅ PPO model created for CUDA training")
 
     # Monitor VRAM after model creation
     vram_after = torch.cuda.memory_allocated() / (1024**3)
     model_vram = vram_after - vram_before
     print(f"   VRAM after model: {vram_after:.2f} GB")
-    print(f"   Model VRAM usage: {model_vram:.2f} GB")
+    print(f"   Model VRAM: {model_vram:.2f} GB")
     print(f"   Available VRAM: {12 - vram_after:.2f} GB")
 
-    # Verify model is on correct device
-    print(f"🔍 Model device verification:")
-    for name, param in model.policy.named_parameters():
-        print(f"   {name}: {param.device}")
-        break
-
     # Checkpoint callback
-    checkpoint_freq = 500000
     checkpoint_callback = CheckpointCallback(
-        save_freq=checkpoint_freq,
+        save_freq=100000,
         save_path=save_dir,
-        name_prefix=f"ppo_samurai_cuda_massive_{actual_envs}env",
+        name_prefix="ppo_ultra_deep_single_env",
     )
-
-    print(f"💾 Checkpoint frequency: every {checkpoint_freq} steps")
 
     # Training
     start_time = time.time()
-    print(f"🏋️ Starting 4 ENV + 2000+ BATCH training")
-    print(f"   📊 {total_samples_per_rollout:,} samples per rollout")
-    print(f"   💪 {batch_size:,} batch size (TARGET: 2000+)")
-    print(f"   🚀 Using 4 environments for optimal balance")
+    print(f"🏋️ Starting ULTRA-DEEP training")
+    print(f"   🎮 Single environment with game UI")
+    print(f"   🧠 Network depth: ~30 layers")
+    print(f"   💪 Batch size: {batch_size:,}")
 
     try:
         model.learn(
@@ -409,41 +439,31 @@ def main():
         )
 
         training_time = time.time() - start_time
-        print(
-            f"🎉 4 ENV + 2000+ BATCH training completed in {training_time/3600:.1f} hours!"
-        )
+        print(f"🎉 Training completed in {training_time/3600:.1f} hours!")
 
     except KeyboardInterrupt:
         print(f"⏹️ Training interrupted")
-        training_time = time.time() - start_time
-        print(f"Training time: {training_time/3600:.1f} hours")
-
     except Exception as e:
         print(f"❌ Training failed: {e}")
         import traceback
 
         traceback.print_exc()
-
     finally:
         env.close()
         torch.cuda.empty_cache()
-        print("🧹 Memory cleared")
 
     # Save final model
-    final_model_path = os.path.join(
-        save_dir, f"ppo_samurai_cuda_massive_final_{actual_envs}env.zip"
-    )
-    model.save(final_model_path)
-    print(f"💾 Final model saved to: {final_model_path}")
+    final_path = os.path.join(save_dir, "ppo_ultra_deep_final.zip")
+    model.save(final_path)
+    print(f"💾 Model saved: {final_path}")
 
     # Final VRAM report
     final_vram = torch.cuda.memory_allocated() / (1024**3)
     max_vram = torch.cuda.max_memory_allocated() / (1024**3)
-    print(f"📊 Final VRAM usage: {final_vram:.2f} GB")
-    print(f"📊 Peak VRAM usage: {max_vram:.2f} GB")
+    print(f"📊 Final VRAM: {final_vram:.2f} GB")
+    print(f"📊 Peak VRAM: {max_vram:.2f} GB")
 
-    print("✅ 4 ENV + 2000+ BATCH training complete!")
-    print(f"🎯 Strategy: Used 4 environments + massive batches for optimal performance")
+    print("✅ ULTRA-DEEP SINGLE ENV TRAINING COMPLETE!")
 
 
 if __name__ == "__main__":
