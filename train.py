@@ -7,6 +7,8 @@ import psutil
 import numpy as np
 import gc
 import collections
+import zipfile
+import json
 
 import retro
 import gymnasium as gym
@@ -53,6 +55,95 @@ def get_actual_observation_dims(game, state):
     except Exception as e:
         print(f"⚠️ Could not determine observation dimensions: {e}")
         return (9, 168, 240)  # Fallback
+
+
+def save_model_to_zip(model, save_path, additional_data=None):
+    """Save model and metadata to a ZIP file"""
+    print(f"💾 Saving model to ZIP: {save_path}")
+    
+    # Create temporary directory for files
+    temp_dir = "temp_model_files"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        # Save model state dict
+        model_path = os.path.join(temp_dir, "model_state_dict.pth")
+        torch.save(model.state_dict(), model_path)
+        
+        # Save model configuration
+        config_data = {
+            "observation_shape": model.observation_shape,
+            "action_dim": model.action_dim,
+            "hidden_size": model.hidden_size,
+            "max_ep_len": model.max_ep_len,
+            "model_class": "DecisionTransformer"
+        }
+        
+        # Add additional data if provided
+        if additional_data:
+            config_data.update(additional_data)
+            
+        config_path = os.path.join(temp_dir, "config.json")
+        with open(config_path, 'w') as f:
+            json.dump(config_data, f, indent=2)
+            
+        # Create ZIP file
+        with zipfile.ZipFile(save_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            # Add model state dict
+            zipf.write(model_path, "model_state_dict.pth")
+            # Add configuration
+            zipf.write(config_path, "config.json")
+            
+        print(f"✅ Model saved successfully to {save_path}")
+        
+    finally:
+        # Clean up temporary files
+        import shutil
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+
+
+def load_model_from_zip(zip_path, device="cpu"):
+    """Load model from ZIP file"""
+    print(f"📂 Loading model from ZIP: {zip_path}")
+    
+    # Create temporary directory for extraction
+    temp_dir = "temp_extract"
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    try:
+        # Extract ZIP file
+        with zipfile.ZipFile(zip_path, 'r') as zipf:
+            zipf.extractall(temp_dir)
+            
+        # Load configuration
+        config_path = os.path.join(temp_dir, "config.json")
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+            
+        # Create model
+        model = DecisionTransformer(
+            observation_shape=config["observation_shape"],
+            action_dim=config["action_dim"],
+            hidden_size=config["hidden_size"],
+            n_layer=4,  # Default value
+            n_head=4,   # Default value
+            max_ep_len=config["max_ep_len"]
+        )
+        
+        # Load state dict
+        model_path = os.path.join(temp_dir, "model_state_dict.pth")
+        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.to(device)
+        
+        print(f"✅ Model loaded successfully from {zip_path}")
+        return model, config
+        
+    finally:
+        # Clean up temporary files
+        import shutil
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
 
 
 def collect_trajectories(
@@ -307,24 +398,19 @@ def main():
     if args.resume and os.path.exists(args.resume):
         print(f"📂 Loading model from: {args.resume}")
 
-        if args.resume.endswith(".pkl"):
-            import pickle
-
+        if args.resume.endswith(".zip"):
             try:
-                with open(args.resume, "rb") as f:
-                    checkpoint_data = pickle.load(f)
-
-                model.load_state_dict(checkpoint_data["model_state_dict"])
+                model, config = load_model_from_zip(args.resume, device)
                 model._is_trained = True  # Mark as trained
-                print(f"✅ Model loaded from .pkl")
+                print(f"✅ Model loaded from .zip")
             except Exception as e:
-                print(f"❌ Error loading: {e}")
+                print(f"❌ Error loading ZIP: {e}")
                 return
         else:
             try:
                 model.load_state_dict(torch.load(args.resume, map_location=device))
                 model._is_trained = True  # Mark as trained
-                print(f"✅ Model loaded")
+                print(f"✅ Model loaded from PyTorch file")
             except Exception as e:
                 print(f"❌ Error loading: {e}")
                 return
@@ -400,28 +486,46 @@ def main():
             context_length=context_length,
         )
 
-        # Save final model
-        import pickle
-
-        final_checkpoint_data = {
-            "model_state_dict": trained_model.state_dict(),
+        # Save final model as ZIP
+        additional_data = {
             "timesteps": args.total_timesteps,
-            "model_config": {
-                "observation_shape": trained_model.observation_shape,
-                "action_dim": trained_model.action_dim,
-                "hidden_size": trained_model.hidden_size,
-                "max_ep_len": trained_model.max_ep_len,
-            },
+            "learning_rate": args.learning_rate,
+            "batch_size": batch_size,
+            "context_length": context_length,
+            "training_epochs": n_steps,
+            "num_trajectories": len(good_trajectories)
         }
 
-        final_pkl_path = os.path.join(
-            save_dir, "decision_transformer_samurai_final.pkl"
+        final_zip_path = os.path.join(
+            save_dir, "decision_transformer_samurai_final.zip"
         )
-        with open(final_pkl_path, "wb") as f:
-            pickle.dump(final_checkpoint_data, f)
+        
+        save_model_to_zip(trained_model, final_zip_path, additional_data)
 
         print(f"🎉 Training completed!")
-        print(f"💾 Final model saved to: {final_pkl_path}")
+        print(f"💾 Final model saved to: {final_zip_path}")
+    else:
+        print("❌ Not enough good trajectories for training")
+
+    # Memory usage summary
+    if torch.cuda.is_available():
+        print(f"🔧 Final GPU Memory:")
+        print(f"   Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+        print(f"   Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+
+    final_memory = psutil.virtual_memory()
+    print(
+        f"🔧 Final RAM Usage: {final_memory.used / (1024**3):.1f} GB ({final_memory.percent:.1f}%)"
+    )
+
+    env.close()
+
+
+if __name__ == "__main__":
+    main()
+
+        print(f"🎉 Training completed!")
+        print(f"💾 Final model saved to: {final_zip_path}")
     else:
         print("❌ Not enough good trajectories for training")
 

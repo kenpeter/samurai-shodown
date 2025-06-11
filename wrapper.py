@@ -524,7 +524,7 @@ class DecisionTransformer(nn.Module):
 
     @classmethod
     def load(cls, path, env=None, device="cpu"):
-        """Load model"""
+        """Load model - basic PyTorch loading"""
         obs_shape = env.observation_space.shape
         action_dim = env.action_space.n
         model = cls(obs_shape, action_dim)

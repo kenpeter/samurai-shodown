@@ -3,7 +3,7 @@ import argparse
 import time
 import numpy as np
 import torch
-import zipfile
+import pickle
 import tempfile
 
 import retro
@@ -43,26 +43,38 @@ def create_eval_env(game, state):
     return env
 
 
-def load_decision_transformer_from_zip(zip_path, env, device="cuda"):
-    """Load Decision Transformer model from .zip file"""
-    print(f"📂 Loading model from: {zip_path}")
-
-    # Extract .pth file from .zip
-    with zipfile.ZipFile(zip_path, "r") as zip_ref:
-        # Find .pth file in zip
-        pth_files = [f for f in zip_ref.namelist() if f.endswith(".pth")]
-        if not pth_files:
-            raise ValueError("No .pth file found in zip archive")
-
-        pth_file = pth_files[0]
-        print(f"Found model file: {pth_file}")
-
-        # Extract to temporary file
-        with tempfile.NamedTemporaryFile(suffix=".pth", delete=False) as temp_file:
-            temp_file.write(zip_ref.read(pth_file))
-            temp_path = temp_file.name
+def load_decision_transformer_from_pkl(pkl_path, env, device="cuda"):
+    """Load Decision Transformer model from .pkl file"""
+    print(f"📂 Loading model from: {pkl_path}")
 
     try:
+        # Load the pickle file
+        with open(pkl_path, "rb") as f:
+            model_data = pickle.load(f)
+
+        # Handle different possible pickle formats
+        if isinstance(model_data, dict):
+            # If it's a dictionary, it might contain state_dict and other info
+            if "state_dict" in model_data:
+                state_dict = model_data["state_dict"]
+                print("Found state_dict in pickle file")
+            elif "model_state_dict" in model_data:
+                state_dict = model_data["model_state_dict"]
+                print("Found model_state_dict in pickle file")
+            else:
+                # Assume the dict itself is the state_dict
+                state_dict = model_data
+                print("Using entire dictionary as state_dict")
+        else:
+            # If it's a model object directly
+            if hasattr(model_data, "state_dict"):
+                state_dict = model_data.state_dict()
+                print("Extracted state_dict from model object")
+            else:
+                # Assume it's already a state_dict
+                state_dict = model_data
+                print("Using pickle data directly as state_dict")
+
         # Create model with same architecture as training
         obs_shape = env.observation_space.shape
         action_dim = env.action_space.n
@@ -77,16 +89,51 @@ def load_decision_transformer_from_zip(zip_path, env, device="cuda"):
         )
 
         # Load state dict
-        model.load_state_dict(torch.load(temp_path, map_location=device))
+        model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
 
         print(f"✅ Model loaded successfully on {device}")
         return model
 
-    finally:
-        # Clean up temp file
-        os.unlink(temp_path)
+    except Exception as e:
+        print(f"❌ Error loading pickle file: {e}")
+        print("Trying alternative loading methods...")
+
+        # Try loading with torch.load (in case it's a torch pickle)
+        try:
+            model_data = torch.load(pkl_path, map_location=device)
+
+            # Create model with same architecture
+            obs_shape = env.observation_space.shape
+            action_dim = env.action_space.n
+
+            model = DecisionTransformer(
+                observation_shape=obs_shape,
+                action_dim=action_dim,
+                hidden_size=256,
+                n_layer=4,
+                n_head=4,
+                max_ep_len=2000,
+            )
+
+            # Load state dict
+            if isinstance(model_data, dict) and "state_dict" in model_data:
+                model.load_state_dict(model_data["state_dict"])
+            elif isinstance(model_data, dict):
+                model.load_state_dict(model_data)
+            else:
+                model.load_state_dict(model_data.state_dict())
+
+            model.to(device)
+            model.eval()
+
+            print(f"✅ Model loaded successfully using torch.load on {device}")
+            return model
+
+        except Exception as e2:
+            print(f"❌ Alternative loading also failed: {e2}")
+            raise e
 
 
 class DecisionTransformerPlayer:
@@ -183,8 +230,8 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models/decision_transformer_samurai_final.zip",
-        help="Path to the trained Decision Transformer model (.zip file)",
+        default="trained_models/decision_transformer_samurai_final.pkl",
+        help="Path to the trained Decision Transformer model (.pkl file)",
     )
     parser.add_argument(
         "--state-file",
@@ -227,11 +274,10 @@ def main():
     # Check if model exists
     if not os.path.exists(args.model_path):
         print(f"❌ Error: Model file not found at {args.model_path}")
-        print("Available models in trained_models/:")
-        if os.path.exists("trained_models"):
-            for f in os.listdir("trained_models"):
-                if f.endswith(".zip"):
-                    print(f"   - {f}")
+        print("Available .pkl models in current directory:")
+        for f in os.listdir("."):
+            if f.endswith(".pkl"):
+                print(f"   - {f}")
         return
 
     game = "SamuraiShodown-Genesis"
@@ -265,7 +311,7 @@ def main():
         device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"🔧 Using device: {device}")
 
-        model = load_decision_transformer_from_zip(args.model_path, env, device)
+        model = load_decision_transformer_from_pkl(args.model_path, env, device)
 
         # Create player
         player = DecisionTransformerPlayer(
