@@ -9,8 +9,139 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim import AdamW
 
 
+class FireKnifeDetector:
+    """Detects fire knife startup using temporal visual patterns"""
+
+    def __init__(self, frame_history_size=9, target_height=168, target_width=240):
+        self.frame_history = collections.deque(maxlen=frame_history_size)
+        self.target_height = target_height
+        self.target_width = target_width
+
+        # Visual pattern detection parameters
+        self.brightness_threshold = 0.3  # Fire knife creates bright effects
+        self.motion_threshold = 0.2  # Opponent movement patterns
+
+        # Game state tracking
+        self.opponent_action_history = collections.deque(maxlen=10)
+
+    def analyze_frame(self, frame, opponent_health, player_health):
+        """Analyze current frame for fire knife startup patterns"""
+
+        self.frame_history.append(frame.copy())
+
+        if len(self.frame_history) < 3:
+            return 0.0  # Need at least 3 frames for temporal analysis
+
+        threat_score = 0.0
+
+        # 1. VISUAL PATTERN DETECTION
+        threat_score += self._detect_visual_patterns()
+
+        # 2. OPPONENT MOVEMENT ANALYSIS
+        threat_score += self._detect_opponent_movement()
+
+        # 3. BRIGHTNESS/EFFECT CHANGES
+        threat_score += self._detect_brightness_changes()
+
+        # 4. GAME STATE CONTEXT
+        threat_score += self._analyze_game_context(opponent_health, player_health)
+
+        # Normalize to 0-1 range
+        threat_score = min(1.0, max(0.0, threat_score))
+
+        return threat_score
+
+    def _detect_visual_patterns(self):
+        """Detect visual patterns that indicate fire knife startup"""
+        if len(self.frame_history) < 3:
+            return 0.0
+
+        current_frame = self.frame_history[-1]
+        prev_frame = self.frame_history[-2]
+
+        # Look for sudden appearance of bright pixels (fire effects)
+        current_bright = np.sum(current_frame > 200) / current_frame.size
+        prev_bright = np.sum(prev_frame > 200) / prev_frame.size
+
+        brightness_increase = current_bright - prev_bright
+
+        if brightness_increase > self.brightness_threshold:
+            return 0.4  # Strong visual indicator
+        elif brightness_increase > self.brightness_threshold * 0.5:
+            return 0.2  # Moderate indicator
+
+        return 0.0
+
+    def _detect_opponent_movement(self):
+        """Detect opponent movement patterns that precede fire knife"""
+        if len(self.frame_history) < 5:
+            return 0.0
+
+        # Analyze opponent region (assume right side of screen for now)
+        opponent_region_width = self.target_width // 3
+
+        movement_scores = []
+        for i in range(len(self.frame_history) - 1):
+            frame1 = self.frame_history[i][:, -opponent_region_width:]
+            frame2 = self.frame_history[i + 1][:, -opponent_region_width:]
+
+            # Calculate frame difference in opponent region
+            diff = np.abs(frame2.astype(float) - frame1.astype(float))
+            movement_score = np.mean(diff) / 255.0
+            movement_scores.append(movement_score)
+
+        # Look for specific movement pattern: stillness followed by action
+        if len(movement_scores) >= 4:
+            recent_movement = movement_scores[-2:]  # Last 2 frames
+            earlier_movement = movement_scores[-4:-2]  # 2 frames before
+
+            # Pattern: was still, now moving (charging up)
+            if np.mean(earlier_movement) < 0.1 and np.mean(recent_movement) > 0.2:
+                return 0.3
+
+        return 0.0
+
+    def _detect_brightness_changes(self):
+        """Detect sudden brightness changes that indicate special moves"""
+        if len(self.frame_history) < 3:
+            return 0.0
+
+        frames = list(self.frame_history)
+        brightness_history = [np.mean(frame) for frame in frames]
+
+        if len(brightness_history) >= 3:
+            # Look for brightness spike (fire knife has bright effects)
+            recent_avg = np.mean(brightness_history[-2:])
+            baseline_avg = np.mean(brightness_history[:-2])
+
+            brightness_ratio = recent_avg / (baseline_avg + 1e-6)
+
+            if brightness_ratio > 1.3:  # 30% brightness increase
+                return 0.3
+            elif brightness_ratio > 1.15:  # 15% increase
+                return 0.1
+
+        return 0.0
+
+    def _analyze_game_context(self, opponent_health, player_health):
+        """Use game state to assess fire knife likelihood"""
+        threat_score = 0.0
+
+        # Opponents are more likely to use special moves when:
+        # 1. They're losing (low health)
+        if opponent_health < 64:  # Less than half health
+            threat_score += 0.2
+
+        # 2. Player is close (would need distance calculation)
+        # For now, assume medium threat if player health is high (opponent getting desperate)
+        if player_health > 90:
+            threat_score += 0.1
+
+        return threat_score
+
+
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Simplified aggressive wrapper for Samurai Showdown training"""
+    """Enhanced wrapper with temporal fire knife detection"""
 
     _global_stats = {
         "total_wins": 0,
@@ -74,6 +205,20 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
+        # Add fire knife detection
+        self.fire_knife_detector = FireKnifeDetector(
+            frame_history_size=self.num_frames,
+            target_height=self.target_height,
+            target_width=self.target_width,
+        )
+
+        # Track attack patterns
+        self.attack_pattern_buffer = collections.deque(
+            maxlen=20
+        )  # Last 20 frames of analysis
+        self.evasion_window = 0  # Countdown for when to dodge
+        self.successful_evasions = 0  # Track successful evasions for logging
+
         # Handle action space conversion
         if hasattr(self.env.action_space, "n"):
             self.action_space = gym.spaces.Discrete(self.env.action_space.n)
@@ -85,10 +230,13 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.action_space = self.env.action_space
             self._original_action_space = self.env.action_space
 
-        print(f"🚀 {self.env_id} Simplified Aggressive Wrapper")
-        print(f"   🎯 Simple rewards: Win/Loss terminal, damage/aggression continuous")
+        print(f"🚀 {self.env_id} Enhanced Temporal Fire Knife Wrapper")
+        print(
+            f"   🎯 Smart rewards: Win/Loss terminal, damage/aggression/evasion continuous"
+        )
         print(f"   📏 Episode length: {max_episode_steps} steps")
-        print(f"   🔥 Anti-fire knife evasion enabled")
+        print(f"   🔥 Temporal fire knife evasion enabled")
+        print(f"   🧠 Visual pattern detection enabled")
 
     def _process_frame(self, rgb_frame):
         """Convert RGB to grayscale and resize"""
@@ -127,6 +275,28 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         opponent_health = info.get("enemy_health", self.full_hp)
         return player_health, opponent_health
 
+    def _detect_fire_knife_startup(
+        self, processed_frame, opponent_health, player_health
+    ):
+        """Detect fire knife startup using visual and game state cues"""
+
+        # Add current frame to detector
+        threat_level = self.fire_knife_detector.analyze_frame(
+            processed_frame, opponent_health, player_health
+        )
+
+        # Store analysis
+        self.attack_pattern_buffer.append(
+            {
+                "frame": processed_frame.copy(),
+                "threat_level": threat_level,
+                "opponent_health": opponent_health,
+                "step": self.episode_steps,
+            }
+        )
+
+        return threat_level
+
     def _log_periodic_stats(self):
         """Log stats periodically"""
         current_time = time.time()
@@ -146,16 +316,80 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                         f"   {emoji} {env_id}: {stats['wins']}W/{stats['losses']}L ({win_rate:.1f}%)"
                     )
 
+            # Show evasion stats
+            if hasattr(self, "successful_evasions"):
+                print(f"   🛡️ Successful evasions: {self.successful_evasions}")
+
             print()
             global_stats["last_log_time"] = current_time
 
     def _calculate_reward(self, curr_player_health, curr_opponent_health, action=None):
-        """SIMPLIFIED: All rewards calculated here"""
+        """Enhanced reward with temporal fire knife detection"""
         reward = 0.0
         done = False
 
-        # 1. ATTACK BONUS - Encourage aggression
-        if action is not None:
+        # Get current processed frame for analysis
+        if len(self.frame_stack) > 0:
+            current_frame = list(self.frame_stack)[-1]
+
+            # Detect fire knife startup
+            threat_level = self._detect_fire_knife_startup(
+                current_frame, curr_opponent_health, curr_player_health
+            )
+
+            # TEMPORAL EVASION REWARDS
+            if threat_level > 0.7:  # High threat detected
+                self.evasion_window = 3  # Should dodge in next 3 frames
+
+                # Reward recognizing the threat
+                reward += 0.2
+
+                # Big reward for immediate evasive action
+                evasive_actions = [1, 3, 2]  # Left, right, back
+                if action in evasive_actions:
+                    reward += 0.5
+                    print(
+                        f"🛡️ EVASION: High threat detected, rewarding dodge action {action}"
+                    )
+
+                # Penalty for attacking into danger
+                attack_actions = [8, 9, 10, 11]
+                if action in attack_actions:
+                    reward -= 0.3
+
+            elif self.evasion_window > 0:
+                # Still in evasion window
+                self.evasion_window -= 1
+
+                evasive_actions = [1, 3, 2]
+                if action in evasive_actions:
+                    reward += 0.3
+                    print(
+                        f"🛡️ EVASION: Dodging in danger window (remaining: {self.evasion_window})"
+                    )
+
+            # SUCCESSFUL EVASION DETECTION
+            # If we were in danger but didn't take big damage
+            if len(self.attack_pattern_buffer) >= 5:
+                recent_threats = [
+                    a["threat_level"] for a in list(self.attack_pattern_buffer)[-5:]
+                ]
+                max_recent_threat = max(recent_threats)
+
+                # If high threat was detected recently but we avoided damage
+                if max_recent_threat > 0.7:
+                    damage_taken = self.prev_player_health - curr_player_health
+                    if damage_taken < 5:  # Successfully avoided major damage
+                        reward += 1.0  # Big reward for successful evasion
+                        self.successful_evasions += 1
+                        print(
+                            f"🏆 SUCCESSFUL EVASION: Avoided fire knife! Total evasions: {self.successful_evasions}"
+                        )
+
+        # 1. ATTACK BONUS - Encourage aggression (when not in danger)
+        if (
+            action is not None and self.evasion_window == 0
+        ):  # Only reward aggression when safe
             attack_actions = [8, 9, 10, 11]  # Main attack buttons
             defensive_actions = [4, 5, 6, 7]  # Block/defensive moves
             movement_actions = [0, 1, 2, 3]  # Movement/jump
@@ -168,7 +402,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 combo_bonus = min(self.consecutive_attacks * 0.1, 0.5)
                 reward += combo_bonus
             elif action in defensive_actions:
-                # Small penalty for defensive play
+                # Small penalty for defensive play (unless evading)
                 reward -= 0.1
                 self.consecutive_attacks = 0
             elif action in movement_actions:
@@ -191,18 +425,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 damage_penalty = damage_taken * 0.02  # Small penalty for taking damage
                 reward -= damage_penalty
 
-        # 4. FIRE KNIFE EVASION - Detect and reward avoiding big attacks
-        # Look for sudden large damage spikes (fire knife does big damage)
-        if hasattr(self, "prev_player_health"):
-            damage_taken = self.prev_player_health - curr_player_health
-            if damage_taken >= 20:  # Fire knife does significant damage
-                # Extra penalty for getting hit by special attacks
-                reward -= 0.5
-            elif damage_taken == 0 and action in [1, 3]:  # Moved away successfully
-                # Small bonus for evasive movement when not taking damage
-                reward += 0.1
+                # Extra penalty for big damage (likely fire knife hit)
+                if damage_taken >= 20:
+                    reward -= 1.0
+                    print(f"💀 FIRE KNIFE HIT: Major damage penalty")
 
-        # 5. TERMINAL REWARDS - Simple win/loss
+        # 4. TERMINAL REWARDS - Simple win/loss
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
             SamuraiShowdownCustomWrapper._global_stats["total_rounds"] += 1
@@ -229,11 +457,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 else:
                     quick_bonus = 0.0
 
-                total_win_reward = 2.0 + dominance_bonus + quick_bonus
+                # Evasion bonus: extra reward for successful evasions during match
+                evasion_bonus = min(self.successful_evasions * 0.2, 1.0)
+
+                total_win_reward = 2.0 + dominance_bonus + quick_bonus + evasion_bonus
                 reward += total_win_reward
 
                 print(
                     f"🏆 {self.env_id} WIN! Health: {curr_player_health}/{self.full_hp} "
+                    f"Evasions: {self.successful_evasions} "
                     f"Reward: +{total_win_reward:.2f} ({self.wins}W/{self.losses}L - {win_rate:.1%})"
                 )
 
@@ -254,7 +486,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 reward -= 2.0  # Simple loss penalty
 
                 print(
-                    f"💀 {self.env_id} LOSS! ({self.wins}W/{self.losses}L - {win_rate:.1%})"
+                    f"💀 {self.env_id} LOSS! Evasions: {self.successful_evasions} ({self.wins}W/{self.losses}L - {win_rate:.1%})"
                 )
                 done = True
 
@@ -268,7 +500,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_opponent_health = curr_opponent_health
 
         # Clamp reward to reasonable bounds
-        reward = np.clip(reward, -3.0, 3.0)
+        reward = np.clip(reward, -3.0, 4.0)  # Increased upper bound for evasion rewards
 
         return reward, done
 
@@ -285,6 +517,16 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.prev_opponent_health = self.full_hp
         self.episode_steps = 0
         self.consecutive_attacks = 0
+        self.evasion_window = 0
+        self.successful_evasions = 0
+
+        # Reset fire knife detector
+        self.fire_knife_detector = FireKnifeDetector(
+            frame_history_size=self.num_frames,
+            target_height=self.target_height,
+            target_width=self.target_width,
+        )
+        self.attack_pattern_buffer.clear()
 
         self.frame_stack.clear()
         processed_frame = self._process_frame(observation)
@@ -298,37 +540,48 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def _bias_action_toward_attacks(self, action):
-        """Force more aggressive action selection"""
+        """Enhanced action selection with evasion priority"""
         attack_actions = [8, 9, 10, 11]
         defensive_actions = [4, 5, 6, 7]
+        evasive_actions = [1, 3]  # Left/right movement
 
-        # FIRE KNIFE EVASION: If we detect potential incoming fire knife
-        # (this would need game-specific detection, for now use heuristics)
-        # Force evasive movement occasionally
-        if np.random.random() < 0.1:  # 10% chance to evade
-            evasive_actions = [1, 3]  # Left/right movement
+        # PRIORITY 1: If in evasion window, force evasive movement
+        if self.evasion_window > 0:
+            if np.random.random() < 0.8:  # 80% chance to force evasion
+                return np.random.choice(evasive_actions)
+
+        # PRIORITY 2: Random evasion attempts (10% chance)
+        if np.random.random() < 0.1:
             return np.random.choice(evasive_actions)
 
-        # FORCE AGGRESSION: 40% chance to force attack
-        if np.random.random() < 0.4:
+        # PRIORITY 3: Force aggression when safe (40% chance)
+        if self.evasion_window == 0 and np.random.random() < 0.4:
             return np.random.choice(attack_actions)
 
         # Reduce jumping (often action 0)
         if action == 0 and np.random.random() > 0.1:
             return np.random.choice(attack_actions)
 
-        # Replace blocking with attacks 60% of the time
-        if action in defensive_actions and np.random.random() < 0.6:
+        # Replace blocking with attacks 60% of the time (when safe)
+        if (
+            action in defensive_actions
+            and self.evasion_window == 0
+            and np.random.random() < 0.6
+        ):
             return np.random.choice(attack_actions)
 
-        # 30% chance to force attack for any non-attack action
-        if action not in attack_actions and np.random.random() < 0.3:
+        # 30% chance to force attack for any non-attack action (when safe)
+        if (
+            action not in attack_actions
+            and self.evasion_window == 0
+            and np.random.random() < 0.3
+        ):
             return np.random.choice(attack_actions)
 
         return action
 
     def step(self, action):
-        """Simplified step with all rewards in _calculate_reward"""
+        """Enhanced step with temporal fire knife detection"""
         # Convert action to proper format
         try:
             if hasattr(action, "shape") and action.shape == ():
@@ -342,7 +595,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         except (ValueError, IndexError, TypeError):
             action_int = 0
 
-        # Apply aggression bias
+        # Apply enhanced action bias (includes evasion priority)
         action_int = self._bias_action_toward_attacks(action_int)
 
         # Convert for MultiBinary action space
@@ -384,7 +637,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Extract health and calculate ALL rewards in one place
         curr_player_health, curr_opponent_health = self._extract_health(info)
 
-        # ALL REWARDS CALCULATED HERE
+        # ALL REWARDS CALCULATED HERE (including temporal fire knife detection)
         total_reward, custom_done = self._calculate_reward(
             curr_player_health, curr_opponent_health, action_int
         )
@@ -407,9 +660,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, total_reward, done, truncated, info
 
 
-# Keep the existing DecisionTransformer and training classes unchanged
-class DecisionTransformer(nn.Module):
-    """Decision Transformer for Samurai Showdown"""
+# Enhanced Decision Transformer with temporal processing
+class EnhancedDecisionTransformer(nn.Module):
+    """Enhanced Decision Transformer with better temporal processing for fire knife detection"""
 
     def __init__(
         self,
@@ -426,7 +679,7 @@ class DecisionTransformer(nn.Module):
         self.hidden_size = hidden_size
         self.max_ep_len = max_ep_len
 
-        # CNN encoder
+        # Enhanced CNN encoder with temporal awareness
         self.cnn_encoder = nn.Sequential(
             nn.Conv2d(observation_shape[0], 32, kernel_size=8, stride=4, padding=2),
             nn.ReLU(inplace=True),
@@ -441,6 +694,14 @@ class DecisionTransformer(nn.Module):
         )
 
         cnn_output_size = 256 * 4 * 4
+
+        # Add temporal convolution to better process frame sequences
+        self.temporal_conv = nn.Conv1d(
+            in_channels=cnn_output_size,
+            out_channels=hidden_size,
+            kernel_size=3,
+            padding=1,
+        )
 
         # Embeddings
         self.state_encoder = nn.Linear(cnn_output_size, hidden_size)
@@ -479,11 +740,28 @@ class DecisionTransformer(nn.Module):
     def forward(self, states, actions, returns_to_go, timesteps, attention_mask=None):
         batch_size, seq_len = states.shape[:2]
 
-        # Encode states
+        # Process states through CNN
         states_flat = states.view(-1, *self.observation_shape)
-        state_features = self.cnn_encoder(states_flat)
-        state_embeddings = self.state_encoder(state_features)
-        state_embeddings = state_embeddings.view(batch_size, seq_len, self.hidden_size)
+        state_features = self.cnn_encoder(states_flat)  # [batch*seq, 256*4*4]
+
+        # Reshape for temporal processing
+        state_features = state_features.view(
+            batch_size, seq_len, -1
+        )  # [batch, seq, 256*4*4]
+
+        # Apply temporal convolution for better sequence understanding
+        state_features_temporal = state_features.transpose(
+            1, 2
+        )  # [batch, features, seq]
+        state_features_temporal = self.temporal_conv(
+            state_features_temporal
+        )  # [batch, hidden, seq]
+        state_features_temporal = state_features_temporal.transpose(
+            1, 2
+        )  # [batch, seq, hidden]
+
+        # Use temporal features as state embeddings
+        state_embeddings = state_features_temporal
 
         # Encode other inputs
         action_embeddings = self.action_encoder(actions)
@@ -532,6 +810,10 @@ class DecisionTransformer(nn.Module):
         model.to(device)
         print(f"📂 Model loaded from: {path}")
         return model
+
+
+# Keep existing classes for compatibility
+DecisionTransformer = EnhancedDecisionTransformer  # Use enhanced version by default
 
 
 class TrajectoryDataset(Dataset):
@@ -620,7 +902,7 @@ def train_decision_transformer(
     device="cuda",
     context_length=30,
 ):
-    """Train Decision Transformer with memory optimizations"""
+    """Train Enhanced Decision Transformer with memory optimizations"""
 
     dataset = TrajectoryDataset(trajectories, context_length)
 
@@ -639,13 +921,14 @@ def train_decision_transformer(
     model.to(device)
     model.train()
 
-    print(f"🚀 Training Decision Transformer:")
+    print(f"🚀 Training Enhanced Decision Transformer:")
     print(f"   Device: {device}")
     print(f"   Epochs: {epochs}")
     print(f"   Batch size: {batch_size}")
     print(f"   Learning rate: {lr}")
     print(f"   Context length: {context_length}")
     print(f"   Dataset size: {len(dataset)}")
+    print(f"   🔥 Temporal fire knife detection enabled")
 
     scaler = torch.cuda.amp.GradScaler()
     best_loss = float("inf")
@@ -703,5 +986,6 @@ def train_decision_transformer(
                 cached = torch.cuda.memory_reserved() / 1024**3
                 print(f"   GPU: {allocated:.2f}GB allocated, {cached:.2f}GB cached")
 
-    print(f"✅ Training complete! Best loss: {best_loss:.4f}")
+    print(f"✅ Enhanced Training complete! Best loss: {best_loss:.4f}")
+    print(f"🔥 Model now includes temporal fire knife detection capabilities")
     return model

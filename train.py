@@ -14,10 +14,10 @@ import retro
 import gymnasium as gym
 from stable_baselines3.common.monitor import Monitor
 
-# Import the wrapper (now includes Decision Transformer)
+# Import the enhanced wrapper (now includes Enhanced Decision Transformer)
 from wrapper import (
     SamuraiShowdownCustomWrapper,
-    DecisionTransformer,
+    EnhancedDecisionTransformer,
     train_decision_transformer,
 )
 
@@ -26,7 +26,7 @@ def check_system_resources():
     """Check system resources"""
     if torch.cuda.is_available():
         gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-        print(f"🚀 MEMORY OPTIMIZED System Check:")
+        print(f"🚀 ENHANCED TEMPORAL System Check:")
         print(f"   GPU: {torch.cuda.get_device_name(0)}")
         print(f"   VRAM: {gpu_memory:.1f} GB")
     else:
@@ -59,89 +59,95 @@ def get_actual_observation_dims(game, state):
 
 def save_model_to_zip(model, save_path, additional_data=None):
     """Save model and metadata to a ZIP file"""
-    print(f"💾 Saving model to ZIP: {save_path}")
-    
+    print(f"💾 Saving enhanced model to ZIP: {save_path}")
+
     # Create temporary directory for files
     temp_dir = "temp_model_files"
     os.makedirs(temp_dir, exist_ok=True)
-    
+
     try:
         # Save model state dict
         model_path = os.path.join(temp_dir, "model_state_dict.pth")
         torch.save(model.state_dict(), model_path)
-        
+
         # Save model configuration
         config_data = {
             "observation_shape": model.observation_shape,
             "action_dim": model.action_dim,
             "hidden_size": model.hidden_size,
             "max_ep_len": model.max_ep_len,
-            "model_class": "DecisionTransformer"
+            "model_class": "EnhancedDecisionTransformer",
+            "temporal_features": True,
+            "fire_knife_detection": True,
         }
-        
+
         # Add additional data if provided
         if additional_data:
             config_data.update(additional_data)
-            
+
         config_path = os.path.join(temp_dir, "config.json")
-        with open(config_path, 'w') as f:
+        with open(config_path, "w") as f:
             json.dump(config_data, f, indent=2)
-            
+
         # Create ZIP file
-        with zipfile.ZipFile(save_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        with zipfile.ZipFile(save_path, "w", zipfile.ZIP_DEFLATED) as zipf:
             # Add model state dict
             zipf.write(model_path, "model_state_dict.pth")
             # Add configuration
             zipf.write(config_path, "config.json")
-            
-        print(f"✅ Model saved successfully to {save_path}")
-        
+
+        print(f"✅ Enhanced model saved successfully to {save_path}")
+
     finally:
         # Clean up temporary files
         import shutil
+
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
 
 def load_model_from_zip(zip_path, device="cpu"):
-    """Load model from ZIP file"""
-    print(f"📂 Loading model from ZIP: {zip_path}")
-    
+    """Load enhanced model from ZIP file"""
+    print(f"📂 Loading enhanced model from ZIP: {zip_path}")
+
     # Create temporary directory for extraction
     temp_dir = "temp_extract"
     os.makedirs(temp_dir, exist_ok=True)
-    
+
     try:
         # Extract ZIP file
-        with zipfile.ZipFile(zip_path, 'r') as zipf:
+        with zipfile.ZipFile(zip_path, "r") as zipf:
             zipf.extractall(temp_dir)
-            
+
         # Load configuration
         config_path = os.path.join(temp_dir, "config.json")
-        with open(config_path, 'r') as f:
+        with open(config_path, "r") as f:
             config = json.load(f)
-            
-        # Create model
-        model = DecisionTransformer(
+
+        # Create enhanced model
+        model = EnhancedDecisionTransformer(
             observation_shape=config["observation_shape"],
             action_dim=config["action_dim"],
             hidden_size=config["hidden_size"],
             n_layer=4,  # Default value
-            n_head=4,   # Default value
-            max_ep_len=config["max_ep_len"]
+            n_head=4,  # Default value
+            max_ep_len=config["max_ep_len"],
         )
-        
+
         # Load state dict
         model_path = os.path.join(temp_dir, "model_state_dict.pth")
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
-        
-        print(f"✅ Model loaded successfully from {zip_path}")
+
+        print(f"✅ Enhanced model loaded successfully from {zip_path}")
+        if config.get("fire_knife_detection", False):
+            print(f"🔥 Fire knife detection capabilities enabled")
         return model, config
-        
+
     finally:
         # Clean up temporary files
         import shutil
+
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
 
@@ -152,8 +158,9 @@ def collect_trajectories(
     device="cuda",
     context_length=30,
 ):
-    """Collect trajectories using random actions"""
+    """Collect trajectories using random actions with enhanced logging"""
     print(f"🎮 Collecting {total_timesteps:,} timesteps with RANDOM actions...")
+    print(f"🔥 Enhanced wrapper will detect and reward fire knife evasion")
 
     trajectories = []
     current_timesteps = 0
@@ -164,6 +171,10 @@ def collect_trajectories(
     KEEP_COUNT = 10
     MAX_EPISODE_STEPS = 5000
 
+    # Track evasion statistics
+    total_evasions = 0
+    total_fire_knife_hits = 0
+
     while current_timesteps < total_timesteps:
         trajectory = {"states": [], "actions": [], "rewards": []}
         obs, _ = env.reset()
@@ -172,6 +183,7 @@ def collect_trajectories(
         done = False
         truncated = False
         step_count = 0
+        episode_evasions = 0
 
         while (
             not done
@@ -179,7 +191,7 @@ def collect_trajectories(
             and step_count < MAX_EPISODE_STEPS
             and current_timesteps < total_timesteps
         ):
-            # Simple random action selection - wrapper will handle aggression
+            # Simple random action selection - wrapper will handle aggression AND evasion
             action = env.action_space.sample()
 
             try:
@@ -193,6 +205,13 @@ def collect_trajectories(
 
                 if not done and not truncated:
                     trajectory["states"].append(obs.copy())
+
+                # Track evasions from wrapper
+                if hasattr(env, "successful_evasions"):
+                    current_evasions = env.successful_evasions
+                    if current_evasions > episode_evasions:
+                        episode_evasions = current_evasions
+                        total_evasions += 1
 
                 # FORCE episode termination if too long
                 if step_count >= MAX_EPISODE_STEPS:
@@ -225,7 +244,7 @@ def collect_trajectories(
                 f"🚨 EMERGENCY cleanup: keeping only {len(trajectories)} trajectories"
             )
 
-        # Progress logging
+        # Progress logging with evasion stats
         if current_timesteps > 0 and current_timesteps % 5000 == 0:
             recent_rewards = [sum(t["rewards"]) for t in trajectories[-20:]]
             avg_reward = np.mean(recent_rewards) if recent_rewards else 0
@@ -243,7 +262,7 @@ def collect_trajectories(
             print(
                 f"   📊 {current_timesteps:,}/{total_timesteps:,} | "
                 f"Eps: {episode_count:,} | Traj: {len(trajectories)} | "
-                f"Win: {win_rate:.1f}% | "
+                f"Win: {win_rate:.1f}% | Evasions: {total_evasions} | "
                 f"RAM: {memory_gb:.1f}GB ({memory_percent:.1f}%)"
             )
 
@@ -256,18 +275,19 @@ def collect_trajectories(
     print(
         f"✅ Collected {len(trajectories)} trajectories over {current_timesteps:,} timesteps"
     )
+    print(f"🛡️ Total successful evasions recorded: {total_evasions}")
 
     return trajectories
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Train Samurai Showdown Agent - Single Run Collection and Training"
+        description="Train Enhanced Samurai Showdown Agent with Fire Knife Detection"
     )
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=10000000,
+        default=7000000,
         help="Total timesteps to collect",
     )
     parser.add_argument(
@@ -346,8 +366,8 @@ def main():
     save_dir = "trained_models"
     os.makedirs(save_dir, exist_ok=True)
 
-    # Create training environment
-    print(f"🏗️ Creating training environment...")
+    # Create training environment with ENHANCED wrapper
+    print(f"🏗️ Creating enhanced training environment...")
     env = retro.make(
         game=game,
         state=state,
@@ -355,17 +375,17 @@ def main():
         obs_type=retro.Observations.IMAGE,
         render_mode="human" if args.render else None,
     )
-    env = SamuraiShowdownCustomWrapper(
+    env = SamuraiShowdownCustomWrapper(  # This is now the ENHANCED wrapper
         env,
         reset_round=True,
         rendering=args.render,
         max_episode_steps=15000,
     )
     env = Monitor(env)
-    print(f"✅ Environment created successfully")
+    print(f"✅ Enhanced environment created successfully")
 
     # Test environment
-    print("🧪 Testing environment...")
+    print("🧪 Testing enhanced environment...")
     try:
         obs, info = env.reset()
         print(f"✅ Reset successful - obs shape: {obs.shape}")
@@ -381,11 +401,11 @@ def main():
         print(f"❌ Environment test failed: {e}")
         return
 
-    # Create Decision Transformer model
-    print("🧠 Creating Decision Transformer model...")
+    # Create Enhanced Decision Transformer model
+    print("🧠 Creating Enhanced Decision Transformer model...")
     action_dim = env.action_space.n
 
-    model = DecisionTransformer(
+    model = EnhancedDecisionTransformer(  # Using ENHANCED version
         observation_shape=obs_shape,
         action_dim=action_dim,
         hidden_size=256,
@@ -402,7 +422,7 @@ def main():
             try:
                 model, config = load_model_from_zip(args.resume, device)
                 model._is_trained = True  # Mark as trained
-                print(f"✅ Model loaded from .zip")
+                print(f"✅ Enhanced model loaded from .zip")
             except Exception as e:
                 print(f"❌ Error loading ZIP: {e}")
                 return
@@ -416,7 +436,8 @@ def main():
                 return
 
     param_count = sum(p.numel() for p in model.parameters())
-    print(f"✅ Model created with {param_count:,} parameters")
+    print(f"✅ Enhanced model created with {param_count:,} parameters")
+    print(f"🔥 Temporal fire knife detection capabilities included")
 
     # Move model to GPU
     model.to(device)
@@ -426,7 +447,10 @@ def main():
         temperature = (
             0.7  # Good value for inference: slightly focused but still exploratory
         )
-        print(f"🎮 Running inference with loaded model (temperature={temperature})...")
+        print(
+            f"🎮 Running inference with loaded enhanced model (temperature={temperature})..."
+        )
+        print(f"🛡️ Model will use fire knife evasion capabilities")
 
         # Quick inference test
         obs, _ = env.reset()
@@ -452,12 +476,12 @@ def main():
             if done or truncated:
                 obs, _ = env.reset()
 
-        print(f"✅ Inference test completed!")
+        print(f"✅ Enhanced inference test completed!")
         env.close()
         return
 
-    # Collect trajectories using random actions
-    print(f"📊 Starting trajectory collection...")
+    # Collect trajectories using random actions (wrapper handles the smart behavior)
+    print(f"📊 Starting enhanced trajectory collection...")
     trajectories = collect_trajectories(
         env, args.total_timesteps, device=device, context_length=context_length
     )
@@ -475,7 +499,7 @@ def main():
         good_trajectories = trajectories
 
     if len(good_trajectories) >= 2:
-        print(f"🏋️ Training Decision Transformer...")
+        print(f"🏋️ Training Enhanced Decision Transformer...")
         trained_model = train_decision_transformer(
             model=model,
             trajectories=good_trajectories,
@@ -486,46 +510,28 @@ def main():
             context_length=context_length,
         )
 
-        # Save final model as ZIP
+        # Save final model as ZIP with enhanced metadata
         additional_data = {
             "timesteps": args.total_timesteps,
             "learning_rate": args.learning_rate,
             "batch_size": batch_size,
             "context_length": context_length,
             "training_epochs": n_steps,
-            "num_trajectories": len(good_trajectories)
+            "num_trajectories": len(good_trajectories),
+            "enhanced_features": True,
+            "temporal_processing": True,
+            "fire_knife_detection": True,
         }
 
         final_zip_path = os.path.join(
-            save_dir, "decision_transformer_samurai_final.zip"
+            save_dir, "enhanced_decision_transformer_samurai_final.zip"
         )
-        
+
         save_model_to_zip(trained_model, final_zip_path, additional_data)
 
-        print(f"🎉 Training completed!")
-        print(f"💾 Final model saved to: {final_zip_path}")
-    else:
-        print("❌ Not enough good trajectories for training")
-
-    # Memory usage summary
-    if torch.cuda.is_available():
-        print(f"🔧 Final GPU Memory:")
-        print(f"   Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
-        print(f"   Cached: {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
-
-    final_memory = psutil.virtual_memory()
-    print(
-        f"🔧 Final RAM Usage: {final_memory.used / (1024**3):.1f} GB ({final_memory.percent:.1f}%)"
-    )
-
-    env.close()
-
-
-if __name__ == "__main__":
-    main()
-
-        print(f"🎉 Training completed!")
-        print(f"💾 Final model saved to: {final_zip_path}")
+        print(f"🎉 Enhanced training completed!")
+        print(f"💾 Enhanced model saved to: {final_zip_path}")
+        print(f"🔥 Model includes temporal fire knife detection capabilities")
     else:
         print("❌ Not enough good trajectories for training")
 
