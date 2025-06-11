@@ -17,7 +17,7 @@ from stable_baselines3.common.monitor import Monitor
 # Import the enhanced wrapper (now includes Enhanced Decision Transformer)
 from wrapper import (
     SamuraiShowdownCustomWrapper,
-    EnhancedDecisionTransformer,
+    DecisionTransformer,
     train_decision_transformer,
 )
 
@@ -58,8 +58,8 @@ def get_actual_observation_dims(game, state):
 
 
 def save_model_to_zip(model, save_path, additional_data=None):
-    """Save model and metadata to a ZIP file"""
-    print(f"💾 Saving enhanced model to ZIP: {save_path}")
+    """Save model and metadata to a ZIP file - FIXED JSON serialization"""
+    print(f"💾 Saving model to ZIP: {save_path}")
 
     # Create temporary directory for files
     temp_dir = "temp_model_files"
@@ -70,20 +70,31 @@ def save_model_to_zip(model, save_path, additional_data=None):
         model_path = os.path.join(temp_dir, "model_state_dict.pth")
         torch.save(model.state_dict(), model_path)
 
-        # Save model configuration
+        # Save model configuration - FIXED: Convert numpy types to Python types
         config_data = {
-            "observation_shape": model.observation_shape,
-            "action_dim": model.action_dim,
-            "hidden_size": model.hidden_size,
-            "max_ep_len": model.max_ep_len,
-            "model_class": "EnhancedDecisionTransformer",
-            "temporal_features": True,
-            "fire_knife_detection": True,
+            "observation_shape": [
+                int(x) for x in model.observation_shape
+            ],  # Convert to Python ints
+            "action_dim": int(model.action_dim),  # Convert to Python int
+            "hidden_size": int(model.hidden_size),  # Convert to Python int
+            "max_ep_len": int(model.max_ep_len),  # Convert to Python int
+            "model_class": "DecisionTransformer",  # Keep as string
+            "temporal_features": False,  # Simple version
+            "fire_knife_detection": False,  # Disabled for now
         }
 
-        # Add additional data if provided
+        # Add additional data if provided - FIXED: Convert all values
         if additional_data:
-            config_data.update(additional_data)
+            for key, value in additional_data.items():
+                # Convert numpy types to Python types
+                if hasattr(value, "item"):  # numpy scalar
+                    config_data[key] = value.item()
+                elif isinstance(value, (list, tuple)):  # numpy arrays
+                    config_data[key] = [
+                        int(x) if hasattr(x, "item") else x for x in value
+                    ]
+                else:
+                    config_data[key] = value
 
         config_path = os.path.join(temp_dir, "config.json")
         with open(config_path, "w") as f:
@@ -96,7 +107,7 @@ def save_model_to_zip(model, save_path, additional_data=None):
             # Add configuration
             zipf.write(config_path, "config.json")
 
-        print(f"✅ Enhanced model saved successfully to {save_path}")
+        print(f"✅ Model saved successfully to {save_path}")
 
     finally:
         # Clean up temporary files
@@ -107,8 +118,8 @@ def save_model_to_zip(model, save_path, additional_data=None):
 
 
 def load_model_from_zip(zip_path, device="cpu"):
-    """Load enhanced model from ZIP file"""
-    print(f"📂 Loading enhanced model from ZIP: {zip_path}")
+    """Load model from ZIP file - FIXED version"""
+    print(f"📂 Loading model from ZIP: {zip_path}")
 
     # Create temporary directory for extraction
     temp_dir = "temp_extract"
@@ -124,12 +135,17 @@ def load_model_from_zip(zip_path, device="cpu"):
         with open(config_path, "r") as f:
             config = json.load(f)
 
-        # Create enhanced model
-        model = EnhancedDecisionTransformer(
-            observation_shape=config["observation_shape"],
+        # Import the correct class
+        from wrapper import DecisionTransformer
+
+        # Create model with FIXED types
+        model = DecisionTransformer(
+            observation_shape=tuple(
+                config["observation_shape"]
+            ),  # Convert back to tuple
             action_dim=config["action_dim"],
             hidden_size=config["hidden_size"],
-            n_layer=4,  # Default value
+            n_layer=3,  # Default value for simple version
             n_head=4,  # Default value
             max_ep_len=config["max_ep_len"],
         )
@@ -139,9 +155,7 @@ def load_model_from_zip(zip_path, device="cpu"):
         model.load_state_dict(torch.load(model_path, map_location=device))
         model.to(device)
 
-        print(f"✅ Enhanced model loaded successfully from {zip_path}")
-        if config.get("fire_knife_detection", False):
-            print(f"🔥 Fire knife detection capabilities enabled")
+        print(f"✅ Model loaded successfully from {zip_path}")
         return model, config
 
     finally:
@@ -287,7 +301,7 @@ def main():
     parser.add_argument(
         "--total-timesteps",
         type=int,
-        default=7000000,
+        default=1000000,
         help="Total timesteps to collect",
     )
     parser.add_argument(
@@ -405,7 +419,7 @@ def main():
     print("🧠 Creating Enhanced Decision Transformer model...")
     action_dim = env.action_space.n
 
-    model = EnhancedDecisionTransformer(  # Using ENHANCED version
+    model = DecisionTransformer(  # Using ENHANCED version
         observation_shape=obs_shape,
         action_dim=action_dim,
         hidden_size=256,
@@ -499,7 +513,7 @@ def main():
         good_trajectories = trajectories
 
     if len(good_trajectories) >= 2:
-        print(f"🏋️ Training Enhanced Decision Transformer...")
+        print(f"🏋️ Training Decision Transformer...")
         trained_model = train_decision_transformer(
             model=model,
             trajectories=good_trajectories,
@@ -510,28 +524,27 @@ def main():
             context_length=context_length,
         )
 
-        # Save final model as ZIP with enhanced metadata
+        # Save final model as ZIP with FIXED metadata
         additional_data = {
-            "timesteps": args.total_timesteps,
-            "learning_rate": args.learning_rate,
-            "batch_size": batch_size,
-            "context_length": context_length,
-            "training_epochs": n_steps,
-            "num_trajectories": len(good_trajectories),
-            "enhanced_features": True,
-            "temporal_processing": True,
-            "fire_knife_detection": True,
+            "timesteps": int(args.total_timesteps),  # Convert to Python int
+            "learning_rate": float(args.learning_rate),  # Convert to Python float
+            "batch_size": int(batch_size),  # Convert to Python int
+            "context_length": int(context_length),  # Convert to Python int
+            "training_epochs": int(n_steps),  # Convert to Python int
+            "num_trajectories": int(len(good_trajectories)),  # Convert to Python int
+            "enhanced_features": False,  # Simple version
+            "temporal_processing": False,  # Simple version
+            "fire_knife_detection": False,  # Disabled
         }
 
         final_zip_path = os.path.join(
-            save_dir, "enhanced_decision_transformer_samurai_final.zip"
+            save_dir, "decision_transformer_samurai_final.zip"  # Changed name
         )
 
         save_model_to_zip(trained_model, final_zip_path, additional_data)
 
-        print(f"🎉 Enhanced training completed!")
-        print(f"💾 Enhanced model saved to: {final_zip_path}")
-        print(f"🔥 Model includes temporal fire knife detection capabilities")
+        print(f"🎉 Training completed!")
+        print(f"💾 Model saved to: {final_zip_path}")
     else:
         print("❌ Not enough good trajectories for training")
 
