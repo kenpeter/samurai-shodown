@@ -26,7 +26,9 @@ class DeepCNNFeatureExtractor(BaseFeaturesExtractor):
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
         super().__init__(observation_space, features_dim)
 
-        n_input_channels = observation_space.shape[0]  # 9 frames for temporal patterns
+        n_input_channels = observation_space.shape[
+            0
+        ]  # 27 channels (9 frames × 3 RGB channels)
 
         # Enhanced network for pattern recognition
         self.conv_layers = nn.Sequential(
@@ -67,10 +69,11 @@ class DeepCNNFeatureExtractor(BaseFeaturesExtractor):
 
         print(f"🧠 ENHANCED CNN Network:")
         print(f"   📊 Input: {observation_space.shape}")
+        print(f"   🎨 RGB Processing: 9 frames × 3 RGB channels = 27 input channels")
         print(f"   🔍 Pattern-optimized architecture")
-        print(f"   💪 Channels: 9 → 64 → 128 → 256 → 512")
+        print(f"   💪 Channels: 27 → 64 → 128 → 256 → 512")
         print(f"   🎯 FC layers: 3 layers → {features_dim}")
-        print(f"   🔮 Optimized for temporal pattern recognition")
+        print(f"   🔮 Optimized for RGB temporal pattern recognition")
 
     def _make_conv_block(self, in_channels, out_channels, kernel_size, stride, padding):
         return nn.Sequential(
@@ -192,7 +195,7 @@ def get_observation_dims(game, state):
         return obs_shape
     except Exception as e:
         print(f"⚠️ Could not determine observation dimensions: {e}")
-        return (9, 126, 180)
+        return (27, 126, 180)  # 27 channels for RGB (9 frames × 3 RGB)
 
 
 def linear_schedule(initial_value, final_value=0.0, decay_type="linear"):
@@ -213,10 +216,25 @@ def linear_schedule(initial_value, final_value=0.0, decay_type="linear"):
     return scheduler
 
 
+def cleanup_log_folders():
+    """Remove log folders, keep only model zip files"""
+    folders_to_remove = ["logs_simple", "logs", "tensorboard_logs", "tb_logs"]
+
+    for folder in folders_to_remove:
+        if os.path.exists(folder):
+            try:
+                import shutil
+
+                shutil.rmtree(folder)
+                print(f"🗑️ Removed log folder: {folder}")
+            except Exception as e:
+                print(f"⚠️ Could not remove {folder}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Simplified Samurai Showdown Training")
     parser.add_argument("--total-timesteps", type=int, default=10000000)
-    parser.add_argument("--learning-rate", type=float, default=4e-4)
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--use-default-state", action="store_true")
@@ -236,11 +254,11 @@ def main():
     device = "cuda"
     torch.cuda.empty_cache()
 
-    print(f"🚀 SIMPLIFIED SAMURAI TRAINING")
+    print(f"🚀 SIMPLIFIED SAMURAI TRAINING (RGB)")
     print(f"   💻 Device: {device}")
+    print(f"   🎨 RGB Processing: 9 frames × 3 channels = 27 input channels")
     print(f"   🎯 Simple reward system: +1 damage, -1 injured")
     print(f"   🛡️ Memory optimized for {args.target_vram}GB VRAM")
-    print(f"   💾 Only saving .zip model files (no log folders)")
 
     game = "SamuraiShodown-Genesis"
 
@@ -281,10 +299,11 @@ def main():
     n_steps = args.n_steps
     batch_size = min(max_batch_size, n_steps)
 
-    print(f"🔮 SIMPLIFIED TRAINING PARAMETERS:")
+    print(f"🔮 SIMPLIFIED RGB TRAINING PARAMETERS:")
     print(f"   🎮 Environments: 1 (focused training)")
     print(f"   💪 Batch size: {batch_size:,}")
     print(f"   📏 N-steps: {n_steps:,}")
+    print(f"   🌈 RGB channels: 27 (9 frames × 3 RGB)")
     print(f"   🎯 Simple reward system")
 
     # Create environment with simplified wrapper
@@ -327,7 +346,7 @@ def main():
         model.batch_size = batch_size
         model._setup_model()
     else:
-        print(f"🚀 Creating SIMPLIFIED PPO model")
+        print(f"🚀 Creating SIMPLIFIED RGB PPO model")
 
         lr_schedule = linear_schedule(
             args.learning_rate, args.learning_rate * 0.1, args.lr_schedule
@@ -419,6 +438,7 @@ def main():
     print(f"💾 Model saved: {final_path}")
 
     # Clean up log folders, keep only ZIP files
+    cleanup_log_folders()
     print(f"🗑️ Log folder cleanup completed - only .zip model files remain")
 
     # Final VRAM report
@@ -427,11 +447,12 @@ def main():
     print(f"📊 Final VRAM: {final_vram:.2f} GB")
     print(f"📊 Peak VRAM: {max_vram:.2f} GB")
 
-    print("✅ TRAINING COMPLETE!")
-    print("🎯 Simple damage-based training finished!")
+    print("✅ RGB TRAINING COMPLETE!")
+    print("🎯 Simple damage-based RGB training finished!")
     print("   • +1 reward for damaging opponent")
     print("   • -1 penalty for taking damage")
     print("   • +100 for winning, -100 for losing")
+    print("   🌈 RGB processing with 27 input channels")
     print("💾 Only .zip model files saved, log folders removed")
 
 

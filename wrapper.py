@@ -7,7 +7,7 @@ import math
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Enhanced wrapper with opponent pattern recognition and predictive rewards"""
+    """Enhanced wrapper with RGB processing and opponent pattern recognition"""
 
     def __init__(
         self,
@@ -21,7 +21,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         super(SamuraiShowdownCustomWrapper, self).__init__(env)
         self.env = env
 
-        # Frame processing - optimized for deep networks
+        # Frame processing - RGB only for deep networks
         self.resize_scale = 0.75
         self.num_frames = 9
         self.frame_stack = deque(maxlen=self.num_frames)
@@ -63,21 +63,24 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.target_height = int(original_height * self.resize_scale)
         self.target_width = int(original_width * self.resize_scale)
 
-        # Observation space for ultra-deep network
+        # Observation space for RGB ultra-deep network
+        channels = self.num_frames * 3  # 9 frames × 3 RGB channels = 27 channels
+
         self.observation_space = gym.spaces.Box(
             low=0,
             high=255,
-            shape=(self.num_frames, self.target_height, self.target_width),
+            shape=(channels, self.target_height, self.target_width),
             dtype=np.uint8,
         )
 
-        print(f"⚡ SAMURAI SHOWDOWN SIMPLIFIED WRAPPER")
+        print(f"⚡ SAMURAI SHOWDOWN RGB WRAPPER")
         print(f"   🎮 Action space: {self.env.action_space}")
         print(f"   🎮 Using MultiBinary action space")
         print(f"   🎯 Simple rewards: Damage opponent +1, Take damage -1")
         print(f"   📏 Episode length: {max_episode_steps} steps")
         print(f"   📊 Frame stack: {self.num_frames} frames")
         print(f"   🖼️  Frame size: {self.target_height}x{self.target_width}")
+        print(f"   🌈 Input channels: {channels} (RGB only)")
 
     def _extract_game_state(self, info):
         """Extract basic game state information"""
@@ -91,37 +94,60 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         }
 
     def _process_frame(self, rgb_frame):
-        """Optimized frame processing for deep networks"""
+        """RGB-only frame processing for deep networks"""
+        # Ensure we have RGB input
         if len(rgb_frame.shape) == 3 and rgb_frame.shape[2] == 3:
-            gray = np.dot(rgb_frame, [0.299, 0.587, 0.114])
-            gray = gray.astype(np.uint8)
+            # Already RGB
+            frame = rgb_frame
         else:
-            gray = rgb_frame
+            # Convert grayscale to RGB by repeating channels
+            if len(rgb_frame.shape) == 2:
+                frame = np.stack([rgb_frame, rgb_frame, rgb_frame], axis=2)
+            else:
+                frame = rgb_frame
 
-        if gray.shape[:2] != (self.target_height, self.target_width):
-            h_ratio = gray.shape[0] / self.target_height
-            w_ratio = gray.shape[1] / self.target_width
+        # RGB resizing
+        if frame.shape[:2] != (self.target_height, self.target_width):
+            h_ratio = frame.shape[0] / self.target_height
+            w_ratio = frame.shape[1] / self.target_width
             h_indices = (np.arange(self.target_height) * h_ratio).astype(int)
             w_indices = (np.arange(self.target_width) * w_ratio).astype(int)
-            resized = gray[np.ix_(h_indices, w_indices)]
+
+            # Handle RGB channels properly
+            resized = np.zeros(
+                (self.target_height, self.target_width, 3), dtype=np.uint8
+            )
+            for c in range(3):
+                resized[:, :, c] = frame[np.ix_(h_indices, w_indices, [c])].squeeze()
             return resized
         else:
-            return gray
+            return frame
 
     def _stack_observation(self):
-        """Stack frames for ultra-deep network input"""
+        """Stack RGB frames for ultra-deep network input"""
         frames_list = list(self.frame_stack)
 
+        # Fill missing frames with duplicates of the first frame
         while len(frames_list) < self.num_frames:
             if len(frames_list) > 0:
                 frames_list.insert(0, frames_list[0].copy())
             else:
                 dummy_frame = np.zeros(
-                    (self.target_height, self.target_width), dtype=np.uint8
+                    (self.target_height, self.target_width, 3), dtype=np.uint8
                 )
                 frames_list.append(dummy_frame)
 
-        stacked = np.stack(frames_list, axis=0)
+        # Stack RGB frames: shape will be (27, height, width)
+        # Each frame is (height, width, 3), we want (9*3, height, width)
+        stacked_frames = []
+        for frame in frames_list:
+            # Move channels to first dimension: (3, height, width)
+            frame_chw = np.transpose(frame, (2, 0, 1))
+            stacked_frames.append(frame_chw)
+
+        # Concatenate along channel dimension: (27, height, width)
+        stacked = np.concatenate(stacked_frames, axis=0)
+
         return stacked
 
     def _extract_health(self, info):
@@ -208,7 +234,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 else:
                     performance = "🎯 LEARNING"
 
-                print(f"\n📊 TRAINING STATS:")
+                print(f"\n📊 RGB TRAINING STATS:")
                 print(f"   {performance} | Win Rate: {win_rate:.1f}%")
                 print(
                     f"   🎮 Rounds: {self.total_rounds} ({self.wins}W/{self.losses}L)"
@@ -255,7 +281,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """Simple step with damage-based rewards"""
+        """Simple step with damage-based rewards and RGB processing"""
 
         # Simple action handling - expect MultiBinary format
         try:
@@ -297,7 +323,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
             # Return emergency fallback values
             dummy_obs = np.zeros(
-                (self.target_height, self.target_width), dtype=np.uint8
+                (self.target_height, self.target_width, 3), dtype=np.uint8
             )
             self.frame_stack.append(dummy_obs)
             stacked_obs = self._stack_observation()
@@ -332,7 +358,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
     def close(self):
         """Clean shutdown with final statistics"""
-        print(f"\n🏁 FINAL STATISTICS:")
+        print(f"\n🏁 FINAL RGB STATISTICS:")
 
         if self.total_rounds > 0:
             final_win_rate = self.wins / self.total_rounds * 100
@@ -354,13 +380,13 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 )
 
             if final_win_rate >= 70:
-                summary = "🏆 EXCELLENT PERFORMANCE!"
+                summary = "🏆 EXCELLENT RGB PERFORMANCE!"
             elif final_win_rate >= 50:
-                summary = "⚔️ GOOD PERFORMANCE!"
+                summary = "⚔️ GOOD RGB PERFORMANCE!"
             elif final_win_rate >= 30:
-                summary = "📈 SOLID IMPROVEMENT!"
+                summary = "📈 SOLID RGB IMPROVEMENT!"
             else:
-                summary = "🎯 GOOD LEARNING PROGRESS!"
+                summary = "🎯 GOOD RGB LEARNING PROGRESS!"
 
             print(f"   {summary}")
 
