@@ -102,7 +102,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_samurai_cuda/ppo_samurai_cuda_massive_4env_final.zip",
+        default="trained_models_ultra_deep/ppo_ultra_deep_2400000_steps.zip",
         help="Path to the trained CUDA model",
     )
     parser.add_argument(

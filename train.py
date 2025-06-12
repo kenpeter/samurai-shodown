@@ -87,15 +87,14 @@ class DeepCNNFeatureExtractor(BaseFeaturesExtractor):
 
 
 class TrainingCallback(BaseCallback):
-    """Custom callback to monitor enhanced performance"""
+    """Custom callback to monitor training performance"""
 
     def __init__(self, verbose=0):
         super(TrainingCallback, self).__init__(verbose)
-        self.prediction_log = []
         self.last_stats_log = 0
 
     def _on_step(self) -> bool:
-        # Log enhanced statistics every 10000 steps
+        # Log statistics every 10000 steps
         if (
             self.num_timesteps % 10000 == 0
             and self.num_timesteps != self.last_stats_log
@@ -107,30 +106,19 @@ class TrainingCallback(BaseCallback):
                 try:
                     env_stats = self.training_env.get_attr("current_stats")[0]
 
-                    prediction_accuracy = env_stats.get("prediction_accuracy", 0) * 100
-                    anticipation_rewards = env_stats.get("anticipation_rewards", 0)
-                    recognized_patterns = env_stats.get("recognized_patterns", 0)
+                    win_rate = env_stats.get("win_rate", 0) * 100
+                    wins = env_stats.get("wins", 0)
+                    losses = env_stats.get("losses", 0)
 
-                    print(
-                        f"\n🔮 ENHANCED TRAINING UPDATE - Step {self.num_timesteps:,}"
-                    )
-                    print(f"   🎯 Prediction Accuracy: {prediction_accuracy:.1f}%")
-                    print(f"   🧠 Anticipation Rewards: {anticipation_rewards:.2f}")
-                    print(f"   📊 Recognized Patterns: {recognized_patterns}")
+                    print(f"\n📊 TRAINING UPDATE - Step {self.num_timesteps:,}")
+                    print(f"   🎯 Win Rate: {win_rate:.1f}%")
+                    print(f"   🏆 Record: {wins}W/{losses}L")
 
-                    # Log to tensorboard if available
-                    if hasattr(self.logger, "record"):
-                        self.logger.record("enhanced/accuracy", prediction_accuracy)
-                        self.logger.record(
-                            "enhanced/anticipation_rewards", anticipation_rewards
-                        )
-                        self.logger.record(
-                            "enhanced/patterns_recognized", recognized_patterns
-                        )
+                    # Note: Removed tensorboard logging to avoid log folder creation
 
                 except Exception as e:
                     if self.verbose:
-                        print(f"   Warning: Could not get enhanced stats: {e}")
+                        print(f"   Warning: Could not get training stats: {e}")
 
         return True
 
@@ -197,7 +185,6 @@ def get_observation_dims(game, state):
             obs_type=retro.Observations.IMAGE,
             render_mode=None,
         )
-        # FIXED: Use correct wrapper class name
         wrapped_env = SamuraiShowdownCustomWrapper(temp_env, rendering=False)
         obs_shape = wrapped_env.observation_space.shape
         temp_env.close()
@@ -227,7 +214,7 @@ def linear_schedule(initial_value, final_value=0.0, decay_type="linear"):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Enhanced Samurai Showdown Training")
+    parser = argparse.ArgumentParser(description="Simplified Samurai Showdown Training")
     parser.add_argument("--total-timesteps", type=int, default=10000000)
     parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument("--resume", type=str, default=None)
@@ -235,7 +222,6 @@ def main():
     parser.add_argument("--use-default-state", action="store_true")
     parser.add_argument("--target-vram", type=float, default=9.0)
     parser.add_argument("--n-steps", type=int, default=4096)
-    parser.add_argument("--prediction-horizon", type=int, default=30)
     parser.add_argument(
         "--lr-schedule",
         type=str,
@@ -250,11 +236,11 @@ def main():
     device = "cuda"
     torch.cuda.empty_cache()
 
-    print(f"🚀 ENHANCED SAMURAI TRAINING")
+    print(f"🚀 SIMPLIFIED SAMURAI TRAINING")
     print(f"   💻 Device: {device}")
-    print(f"   🔮 Prediction horizon: {args.prediction_horizon} frames")
-    print(f"   📚 Learning schedule: {args.lr_schedule}")
+    print(f"   🎯 Simple reward system: +1 damage, -1 injured")
     print(f"   🛡️ Memory optimized for {args.target_vram}GB VRAM")
+    print(f"   💾 Only saving .zip model files (no log folders)")
 
     game = "SamuraiShodown-Genesis"
 
@@ -295,15 +281,14 @@ def main():
     n_steps = args.n_steps
     batch_size = min(max_batch_size, n_steps)
 
-    print(f"🔮 ENHANCED TRAINING PARAMETERS:")
+    print(f"🔮 SIMPLIFIED TRAINING PARAMETERS:")
     print(f"   🎮 Environments: 1 (focused training)")
     print(f"   💪 Batch size: {batch_size:,}")
     print(f"   📏 N-steps: {n_steps:,}")
-    print(f"   🧠 Pattern prediction enabled")
-    print(f"   🎯 Enhanced reward system")
+    print(f"   🎯 Simple reward system")
 
-    # Create environment with enhanced wrapper
-    print(f"🔧 Creating enhanced environment...")
+    # Create environment with simplified wrapper
+    print(f"🔧 Creating simplified environment...")
     try:
         env = retro.make(
             game=game,
@@ -313,24 +298,22 @@ def main():
             render_mode="human" if args.render else None,
         )
 
-        # FIXED: Use correct wrapper class name
         env = SamuraiShowdownCustomWrapper(
             env,
             reset_round=True,
             rendering=args.render,
-            max_episode_steps=15000,  # Longer episodes for pattern learning
-            prediction_horizon=args.prediction_horizon,
+            max_episode_steps=15000,
         )
 
         env = Monitor(env)
-        print(f"✅ Enhanced environment created")
+        print(f"✅ Simplified environment created")
 
     except Exception as e:
         print(f"❌ Failed to create environment: {e}")
         return
 
     # Create save directory
-    save_dir = "trained_models_ultra_deep"
+    save_dir = "trained_models_simple"
     os.makedirs(save_dir, exist_ok=True)
 
     torch.cuda.empty_cache()
@@ -344,7 +327,7 @@ def main():
         model.batch_size = batch_size
         model._setup_model()
     else:
-        print(f"🚀 Creating ENHANCED PPO model")
+        print(f"🚀 Creating SIMPLIFIED PPO model")
 
         lr_schedule = linear_schedule(
             args.learning_rate, args.learning_rate * 0.1, args.lr_schedule
@@ -365,7 +348,7 @@ def main():
             vf_coef=0.5,
             max_grad_norm=0.5,
             gae_lambda=0.95,
-            tensorboard_log="logs_ultra_deep",
+            tensorboard_log=None,  # Disabled tensorboard logging
             policy_kwargs=dict(
                 features_extractor_class=DeepCNNFeatureExtractor,
                 features_extractor_kwargs=dict(features_dim=512),
@@ -386,20 +369,19 @@ def main():
     print(f"   VRAM after model: {vram_after:.2f} GB")
     print(f"   Model VRAM: {model_vram:.2f} GB")
 
-    # Enhanced callbacks for training
+    # Simplified callbacks for training
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000,  # More frequent saves for pattern preservation
+        save_freq=50000,
         save_path=save_dir,
-        name_prefix="ppo_ultra_deep",
+        name_prefix="ppo_simple",
     )
 
     training_callback = TrainingCallback(verbose=1)
 
-    # Training with enhanced monitoring
+    # Training with monitoring
     start_time = time.time()
-    print(f"🏋️ Starting ENHANCED TRAINING")
-    print(f"   🔮 Focus: Pattern recognition and anticipation")
-    print(f"   🧠 Enhanced reward system for prediction accuracy")
+    print(f"🏋️ Starting SIMPLIFIED TRAINING")
+    print(f"   🎯 Focus: Simple damage-based rewards")
 
     try:
         model.learn(
@@ -409,24 +391,19 @@ def main():
         )
 
         training_time = time.time() - start_time
-        print(f"🎉 Enhanced training completed in {training_time/3600:.1f} hours!")
+        print(f"🎉 Training completed in {training_time/3600:.1f} hours!")
 
-        # Final enhanced performance assessment
+        # Final performance assessment
         if hasattr(env, "current_stats"):
             final_stats = env.current_stats
-            print(f"\n🔮 FINAL ENHANCED PERFORMANCE:")
-            print(f"   🎯 Final Win Rate: {final_stats['win_rate']*100:.1f}%")
-            print(
-                f"   🧠 Prediction Accuracy: {final_stats['prediction_accuracy']*100:.1f}%"
-            )
-            print(f"   📊 Patterns Recognized: {final_stats['recognized_patterns']}")
-            print(f"   🎭 Pattern Types: {final_stats['pattern_types']}")
-            print(
-                f"   🏆 Anticipation Rewards: {final_stats['anticipation_rewards']:.2f}"
-            )
+            print(f"\n🎯 FINAL PERFORMANCE:")
+            print(f"   🏆 Final Win Rate: {final_stats['win_rate']*100:.1f}%")
+            print(f"   🎮 Total Rounds: {final_stats['total_rounds']}")
+            print(f"   🏆 Wins: {final_stats['wins']}")
+            print(f"   💀 Losses: {final_stats['losses']}")
 
     except KeyboardInterrupt:
-        print(f"⏹️ Enhanced training interrupted")
+        print(f"⏹️ Training interrupted")
     except Exception as e:
         print(f"❌ Training failed: {e}")
         import traceback
@@ -437,9 +414,12 @@ def main():
         torch.cuda.empty_cache()
 
     # Save final model
-    final_path = os.path.join(save_dir, "ppo_ultra_deep_final.zip")
+    final_path = os.path.join(save_dir, "ppo_simple_final.zip")
     model.save(final_path)
-    print(f"💾 Enhanced model saved: {final_path}")
+    print(f"💾 Model saved: {final_path}")
+
+    # Clean up log folders, keep only ZIP files
+    print(f"🗑️ Log folder cleanup completed - only .zip model files remain")
 
     # Final VRAM report
     final_vram = torch.cuda.memory_allocated() / (1024**3)
@@ -447,12 +427,12 @@ def main():
     print(f"📊 Final VRAM: {final_vram:.2f} GB")
     print(f"📊 Peak VRAM: {max_vram:.2f} GB")
 
-    print("✅ ENHANCED TRAINING COMPLETE!")
-    print("🔮 Agent should now demonstrate:")
-    print("   • Pattern recognition capabilities")
-    print("   • Anticipatory decision making")
-    print("   • Proactive counter-strategies")
-    print("   • Enhanced reaction timing")
+    print("✅ TRAINING COMPLETE!")
+    print("🎯 Simple damage-based training finished!")
+    print("   • +1 reward for damaging opponent")
+    print("   • -1 penalty for taking damage")
+    print("   • +100 for winning, -100 for losing")
+    print("💾 Only .zip model files saved, log folders removed")
 
 
 if __name__ == "__main__":
