@@ -216,7 +216,7 @@ def linear_schedule(initial_value, final_value=0.0, decay_type="linear"):
 def main():
     parser = argparse.ArgumentParser(description="Simplified Samurai Showdown Training")
     parser.add_argument("--total-timesteps", type=int, default=10000000)
-    parser.add_argument("--learning-rate", type=float, default=2e-4)
+    parser.add_argument("--learning-rate", type=float, default=4e-4)
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--use-default-state", action="store_true")
