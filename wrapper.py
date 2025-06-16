@@ -111,17 +111,20 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"⚡ FIGHTING GAME OPTIMIZED WRAPPER")
         print(f"   🎮 Action space: {self.env.action_space}")
         print(f"   🎮 Using MultiBinary action space")
-        print(f"   🎯 Multi-component rewards:")
-        print(f"      • Sparse win/loss: {self.reward_weights['sparse_win_loss']:.1f}")
+        print(f"   🎯 Multi-component rewards (NORMALIZED):")
         print(
-            f"      • Dense performance: {self.reward_weights['dense_performance']:.1f}"
+            f"      • Sparse win/loss: {self.reward_weights['sparse_win_loss']:.1f} × [-1, +1]"
         )
         print(
-            f"      • Spacing/distance: {self.reward_weights['shaped_positioning']:.1f}"
+            f"      • Dense performance: {self.reward_weights['dense_performance']:.1f} × [-1, +1]"
         )
         print(
-            f"      • Combo/defensive: {self.reward_weights['intrinsic_exploration']:.1f}"
+            f"      • Spacing/distance: {self.reward_weights['shaped_positioning']:.1f} × [-0.1, +0.1]"
         )
+        print(
+            f"      • Combo/defensive: {self.reward_weights['intrinsic_exploration']:.1f} × [0, +1]"
+        )
+        print(f"   📐 Total reward range: [-2.0, +2.0] (clipped)")
         print(f"   📏 Episode length: {max_episode_steps} steps")
         print(f"   📊 Frame stack: {self.num_frames} frames")
         print(f"   🖼️  Frame size: {self.target_height}x{self.target_width}")
@@ -222,16 +225,19 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return player_health, opponent_health
 
     def _calculate_distance_reward(self, current_distance):
-        """Calculate distance-based reward for proper spacing (footsies)"""
+        """Calculate normalized distance-based reward for proper spacing (footsies)"""
         # Distance penalty - encourages optimal fighting distance
         distance_diff = abs(self.optimal_distance - current_distance)
-        distance_reward = -self.distance_lambda * distance_diff / self.optimal_distance
+        # Normalize to [-0.1, +0.1] range
+        distance_reward = -self.distance_lambda * (
+            distance_diff / self.optimal_distance
+        )
 
-        # Bonus for being in optimal range
+        # Bonus for being in optimal range (normalize to +0.05)
         if distance_diff < self.optimal_distance * 0.2:  # Within 20% of optimal
-            distance_reward += 0.1
+            distance_reward += 0.05
 
-        return distance_reward
+        return np.clip(distance_reward, -0.1, 0.1)
 
     def _update_combo_tracking(self, opponent_damage_dealt, current_time):
         """Track combo system for progressive rewards"""
@@ -254,24 +260,27 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 self.current_combo_length = 0
 
     def _calculate_combo_reward(self, opponent_damage_dealt):
-        """Calculate progressive combo rewards"""
+        """Calculate normalized progressive combo rewards"""
         if opponent_damage_dealt > 0 and self.current_combo_length > 1:
-            # Progressive combo scaling: R_combo = base_damage + combo_multiplier * combo_length + execution_bonus
-            base_reward = opponent_damage_dealt * 0.1
-            combo_bonus = self.combo_multiplier * (self.current_combo_length - 1) * 0.1
+            # Progressive combo scaling - normalized to [0, 1] range
+            base_reward = min(opponent_damage_dealt / 20.0, 0.3)  # Cap base at 0.3
+            combo_bonus = min(
+                self.combo_multiplier * (self.current_combo_length - 1) * 0.1, 0.5
+            )
 
-            # Execution bonus for longer combos
+            # Execution bonus for longer combos - normalized
             execution_bonus = 0.0
             if self.current_combo_length >= 3:
-                execution_bonus = 0.2
+                execution_bonus = 0.1
             if self.current_combo_length >= 5:
-                execution_bonus = 0.5
+                execution_bonus = 0.2
 
-            return base_reward + combo_bonus + execution_bonus
+            total_combo_reward = base_reward + combo_bonus + execution_bonus
+            return min(total_combo_reward, 1.0)  # Cap at 1.0
         return 0.0
 
     def _calculate_defensive_reward(self, player_damage_taken, info):
-        """Calculate defensive rewards for blocks and reversals"""
+        """Calculate normalized defensive rewards for blocks and reversals"""
         defensive_reward = 0.0
 
         # Check for successful blocking (taking minimal damage while being attacked)
@@ -282,7 +291,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 self.consecutive_blocks += 1
                 self.total_blocks += 1
 
-                # Progressive blocking rewards
+                # Progressive blocking rewards - normalized to [0, 1]
                 defensive_reward += 0.1  # Base block reward
                 if self.consecutive_blocks >= 2:
                     defensive_reward += 0.2  # Consecutive blocks bonus
@@ -291,48 +300,52 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         else:
             self.consecutive_blocks = 0
 
-        # Check for potential reversal situations (simplified)
+        # Check for potential reversal situations - normalized bonus
         if player_damage_taken == 0 and self.consecutive_blocks >= 2:
             # Bonus for maintaining defense under pressure
-            defensive_reward += self.defensive_bonus * 0.1
+            defensive_reward += min(self.defensive_bonus * 0.05, 0.2)
 
-        return defensive_reward
+        return min(defensive_reward, 1.0)  # Cap at 1.0
 
     def _calculate_multi_component_reward(
         self, curr_player_health, curr_opponent_health, game_state, info
     ):
-        """Multi-component reward system based on fighting game research"""
+        """Multi-component reward system with normalized values"""
 
-        # Component 1: Sparse win/loss rewards
+        # Component 1: Sparse win/loss rewards (normalized to [-1, +1])
         sparse_reward = 0.0
         done = False
 
-        # Component 2: Dense performance rewards (damage-based)
+        # Component 2: Dense performance rewards (normalized to [-1, +1])
         opponent_damage = self.prev_opponent_health - curr_opponent_health
         player_damage = self.prev_player_health - curr_player_health
 
         dense_reward = 0.0
         if opponent_damage > 0:
-            dense_reward = 1.0  # Reward for damaging opponent
+            # Normalize damage reward based on max possible damage per hit (~10-20 HP)
+            dense_reward = min(opponent_damage / 15.0, 1.0)  # Cap at 1.0
         elif player_damage > 0:
-            dense_reward = -1.0  # Penalty for taking damage
+            # Normalize damage penalty
+            dense_reward = -min(player_damage / 15.0, 1.0)  # Cap at -1.0
 
-        # Component 3: Shaped positioning rewards (distance-based)
+        # Component 3: Shaped positioning rewards (already normalized to ~[-0.05, +0.1])
         current_distance = game_state.get("distance", self.optimal_distance)
         positioning_reward = self._calculate_distance_reward(current_distance)
 
-        # Component 4: Intrinsic exploration rewards (combo + defensive)
+        # Component 4: Intrinsic exploration rewards (normalize to [0, +1])
         self._update_combo_tracking(opponent_damage, self.episode_steps)
         combo_reward = self._calculate_combo_reward(opponent_damage)
         defensive_reward = self._calculate_defensive_reward(player_damage, info)
-        exploration_reward = combo_reward + defensive_reward
+
+        # Normalize exploration rewards to [0, 1] range
+        exploration_reward = min((combo_reward + defensive_reward) / 2.0, 1.0)
 
         # Check for round end
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                sparse_reward = 100.0  # Big win reward
+                sparse_reward = 1.0  # Normalized win reward
                 self.wins += 1
                 self.win_streak += 1
                 self.best_win_streak = max(self.best_win_streak, self.win_streak)
@@ -342,7 +355,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 )
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                sparse_reward = -100.0  # Big loss penalty
+                sparse_reward = -1.0  # Normalized loss penalty
                 self.losses += 1
                 self.win_streak = 0
                 win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
@@ -356,12 +369,16 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self._log_periodic_stats()
 
         # Combine all reward components with research-based weights
+        # All components now in similar ranges: [-1, +1] or [0, +1]
         total_reward = (
             self.reward_weights["sparse_win_loss"] * sparse_reward
             + self.reward_weights["dense_performance"] * dense_reward
             + self.reward_weights["shaped_positioning"] * positioning_reward
             + self.reward_weights["intrinsic_exploration"] * exploration_reward
         )
+
+        # Final normalization: ensure total reward is in reasonable range [-2, +2]
+        total_reward = np.clip(total_reward, -2.0, 2.0)
 
         # Update tracking variables
         self.prev_player_health = curr_player_health
