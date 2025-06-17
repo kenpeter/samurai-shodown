@@ -8,21 +8,8 @@ python train.py --resume trained_models_simple/ppo_simple_10150000_steps.zip --r
 
 
 
-python train.py --render --total-timesteps 100000000
 
 
 
+python train.py --batch-size 128 --n-steps 128 --target-vram 8.0 --render --total-timesteps 100000000 --learning-rate 0.0004 --mixed-precision --model-size full --no-accumulation
 
-python train.py --resume trained_models_samurai/ppo_samurai_4env_30000000_steps.zip
-
-
-
-python train.py --total-timesteps 10000000 --learning-rate 4e-3 --render
-
-
-
-
-
-
-
-python train.py --batch-size 1024 --target-vram 12.0 --render --total-timesteps 100000000
