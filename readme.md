@@ -21,4 +21,8 @@ python train.py --total-timesteps 10000000 --learning-rate 4e-3 --render
 
 
 
-python improved_training_script.py --batch-size 1024 --mixed-precision --target-vram 10.0
+
+
+
+
+python train.py --batch-size 1024 --target-vram 12.0 --render --total-timesteps 100000000

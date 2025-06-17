@@ -102,7 +102,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_simple/ppo_simple_5350000_steps.zip",
+        default="trained_models_fighting_optimized/ppo_fighting_optimized_16950000_steps.zip",
         help="Path to the trained CUDA model",
     )
     parser.add_argument(

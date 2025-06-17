@@ -1,622 +1,343 @@
-from collections import deque
-import gymnasium as gym
-import numpy as np
-import time
-from datetime import datetime
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models as models
+from typing import Dict, Any, Optional
 import math
 
 
-class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Enhanced wrapper with multi-component reward system for fighting games"""
+class ChannelAttention(nn.Module):
+    """Channel Attention Module (CAM) from CBAM"""
+
+    def __init__(self, in_channels, reduction=16):
+        super(ChannelAttention, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False),
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+
+class SpatialAttention(nn.Module):
+    """Spatial Attention Module (SAM) from CBAM"""
+
+    def __init__(self, kernel_size=7):
+        super(SpatialAttention, self).__init__()
+        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x = torch.cat([avg_out, max_out], dim=1)
+        x = self.conv1(x)
+        return self.sigmoid(x)
+
+
+class CBAM(nn.Module):
+    """Convolutional Block Attention Module (CBAM)"""
+
+    def __init__(self, in_channels, reduction=16, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.channel_attention = ChannelAttention(in_channels, reduction)
+        self.spatial_attention = SpatialAttention(kernel_size)
+
+    def forward(self, x):
+        x = x * self.channel_attention(x)
+        x = x * self.spatial_attention(x)
+        return x
+
+
+class MultiHeadSpatialAttention(nn.Module):
+    """Multi-Head Spatial Attention for 2D feature maps"""
+
+    def __init__(self, embed_dim, num_heads=8, dropout=0.1):
+        super(MultiHeadSpatialAttention, self).__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+
+        assert (
+            self.head_dim * num_heads == embed_dim
+        ), "embed_dim must be divisible by num_heads"
+
+        self.q_proj = nn.Conv2d(embed_dim, embed_dim, 1)
+        self.k_proj = nn.Conv2d(embed_dim, embed_dim, 1)
+        self.v_proj = nn.Conv2d(embed_dim, embed_dim, 1)
+        self.out_proj = nn.Conv2d(embed_dim, embed_dim, 1)
+
+        self.dropout = nn.Dropout(dropout)
+        self.scale = math.sqrt(self.head_dim)
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        # Generate Q, K, V
+        q = self.q_proj(x)  # [B, C, H, W]
+        k = self.k_proj(x)  # [B, C, H, W]
+        v = self.v_proj(x)  # [B, C, H, W]
+
+        # Reshape for multi-head attention
+        # [B, num_heads, head_dim, H*W]
+        q = q.view(B, self.num_heads, self.head_dim, H * W)
+        k = k.view(B, self.num_heads, self.head_dim, H * W)
+        v = v.view(B, self.num_heads, self.head_dim, H * W)
+
+        # Attention computation
+        # [B, num_heads, H*W, H*W]
+        attn = torch.matmul(q.transpose(-2, -1), k) / self.scale
+        attn = F.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+
+        # Apply attention to values
+        # [B, num_heads, head_dim, H*W]
+        out = torch.matmul(v, attn.transpose(-2, -1))
+
+        # Reshape back to spatial dimensions
+        out = out.view(B, C, H, W)
+        out = self.out_proj(out)
+
+        return out
+
+
+class EfficientNetMultiHeadAttention(nn.Module):
+    """EfficientNet-B3 with Multi-Head Attention for Fighting Game Feature Extraction"""
 
     def __init__(
         self,
-        env,
-        reset_round=True,
-        rendering=False,
-        max_episode_steps=12000,
-        reward_coeff=1.0,
-        prediction_horizon=30,  # How many frames to look ahead
-        # Fighting game specific reward parameters
-        distance_lambda=0.05,  # Weight for distance-based rewards
-        combo_multiplier=1.5,  # Multiplier for combo rewards
-        defensive_bonus=2.0,  # Bonus for successful defensive actions
+        num_input_channels=27,  # 9 frames × 3 RGB channels
+        features_dim=512,
+        num_attention_heads=8,
+        use_cbam=True,
+        use_spatial_attention=True,
+        dropout=0.1,
     ):
-        super(SamuraiShowdownCustomWrapper, self).__init__(env)
-        self.env = env
+        super(EfficientNetMultiHeadAttention, self).__init__()
 
-        # Frame processing - RGB only for deep networks
-        self.resize_scale = 0.75
-        self.num_frames = 9
-        self.frame_stack = deque(maxlen=self.num_frames)
+        self.num_input_channels = num_input_channels
+        self.features_dim = features_dim
+        self.use_cbam = use_cbam
+        self.use_spatial_attention = use_spatial_attention
 
-        # Health tracking
-        self.full_hp = 128
-        self.prev_player_health = self.full_hp
-        self.prev_opponent_health = self.full_hp
-
-        # Fighting game reward parameters
-        self.distance_lambda = distance_lambda
-        self.combo_multiplier = combo_multiplier
-        self.defensive_bonus = defensive_bonus
-
-        # Optimal fighting distance (estimated for 2D fighting games)
-        self.optimal_distance = 80  # Pixels - adjust based on game
-
-        # Combo tracking
-        self.current_combo_length = 0
-        self.last_hit_time = 0
-        self.combo_timeout = 30  # frames
-
-        # Defensive action tracking
-        self.consecutive_blocks = 0
-        self.last_block_time = 0
-
-        # Position tracking
-        self.prev_player_x = 0
-        self.prev_opponent_x = 0
-
-        # Reward system weights (based on research)
-        self.reward_weights = {
-            "sparse_win_loss": 0.6,  # Primary sparse rewards
-            "dense_performance": 0.2,  # Dense damage-based rewards
-            "shaped_positioning": 0.1,  # Distance and spacing rewards
-            "intrinsic_exploration": 0.1,  # Combo and defensive rewards
-        }
-
-        # Episode management
-        self.max_episode_steps = max_episode_steps
-        self.episode_steps = 0
-        self.reset_round = reset_round
-
-        # Statistics tracking
-        self.wins = 0
-        self.losses = 0
-        self.total_rounds = 0
-        self.total_episodes = 0
-        self.total_steps = 0
-
-        # Performance tracking
-        self.episode_rewards = deque(maxlen=100)
-        self.episode_lengths = deque(maxlen=100)
-        self.win_streak = 0
-        self.best_win_streak = 0
-
-        # Fighting game specific stats
-        self.total_combos = 0
-        self.total_blocks = 0
-        self.avg_combo_length = 0
-
-        # Logging
-        self.last_log_time = time.time()
-        self.log_interval = 60
-        self.session_start = time.time()
-
-        # Get frame dimensions
-        dummy_obs, _ = self.env.reset()
-        original_height, original_width = dummy_obs.shape[:2]
-        self.target_height = int(original_height * self.resize_scale)
-        self.target_width = int(original_width * self.resize_scale)
-
-        # Observation space for RGB ultra-deep network
-        channels = self.num_frames * 3  # 9 frames × 3 RGB channels = 27 channels
-
-        self.observation_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(channels, self.target_height, self.target_width),
-            dtype=np.uint8,
+        # Load pre-trained EfficientNet-B3
+        self.efficientnet = models.efficientnet_b3(
+            weights=models.EfficientNet_B3_Weights.IMAGENET1K_V1
         )
 
-        print(f"⚡ FIGHTING GAME OPTIMIZED WRAPPER")
-        print(f"   🎮 Action space: {self.env.action_space}")
-        print(f"   🎮 Using MultiBinary action space")
-        print(f"   🎯 Multi-component rewards (NORMALIZED):")
-        print(
-            f"      • Sparse win/loss: {self.reward_weights['sparse_win_loss']:.1f} × [-1, +1]"
-        )
-        print(
-            f"      • Dense performance: {self.reward_weights['dense_performance']:.1f} × [-1, +1]"
-        )
-        print(
-            f"      • Spacing/distance: {self.reward_weights['shaped_positioning']:.1f} × [-0.1, +0.1]"
-        )
-        print(
-            f"      • Combo/defensive: {self.reward_weights['intrinsic_exploration']:.1f} × [0, +1]"
-        )
-        print(f"   📐 Total reward range: [-2.0, +2.0] (clipped)")
-        print(f"   📏 Episode length: {max_episode_steps} steps")
-        print(f"   📊 Frame stack: {self.num_frames} frames")
-        print(f"   🖼️  Frame size: {self.target_height}x{self.target_width}")
-        print(f"   🌈 Input channels: {channels} (RGB only)")
-        print(f"   ⚔️ Distance lambda: {distance_lambda}")
-        print(f"   🥊 Combo multiplier: {combo_multiplier}")
-        print(f"   🛡️ Defensive bonus: {defensive_bonus}")
-
-    def _extract_game_state(self, info):
-        """Extract enhanced game state information for fighting games"""
-        # Basic health information
-        player_health = info.get("health", self.full_hp)
-        opponent_health = info.get("enemy_health", self.full_hp)
-
-        # Position information (if available)
-        player_x = info.get("player_x", self.prev_player_x)
-        opponent_x = info.get("opponent_x", self.prev_opponent_x)
-
-        # Combat state information
-        player_action = info.get("player_action", 0)
-        opponent_action = info.get("opponent_action", 0)
-
-        return {
-            "player_health": player_health,
-            "opponent_health": opponent_health,
-            "player_x": player_x,
-            "opponent_x": opponent_x,
-            "player_action": player_action,
-            "opponent_action": opponent_action,
-            "distance": (
-                abs(player_x - opponent_x)
-                if player_x != opponent_x
-                else self.optimal_distance
-            ),
-        }
-
-    def _process_frame(self, rgb_frame):
-        """RGB-only frame processing for deep networks"""
-        # Ensure we have RGB input
-        if len(rgb_frame.shape) == 3 and rgb_frame.shape[2] == 3:
-            # Already RGB
-            frame = rgb_frame
-        else:
-            # Convert grayscale to RGB by repeating channels
-            if len(rgb_frame.shape) == 2:
-                frame = np.stack([rgb_frame, rgb_frame, rgb_frame], axis=2)
-            else:
-                frame = rgb_frame
-
-        # RGB resizing
-        if frame.shape[:2] != (self.target_height, self.target_width):
-            h_ratio = frame.shape[0] / self.target_height
-            w_ratio = frame.shape[1] / self.target_width
-            h_indices = (np.arange(self.target_height) * h_ratio).astype(int)
-            w_indices = (np.arange(self.target_width) * w_ratio).astype(int)
-
-            # Handle RGB channels properly
-            resized = np.zeros(
-                (self.target_height, self.target_width, 3), dtype=np.uint8
-            )
-            for c in range(3):
-                resized[:, :, c] = frame[np.ix_(h_indices, w_indices, [c])].squeeze()
-            return resized
-        else:
-            return frame
-
-    def _stack_observation(self):
-        """Stack RGB frames for ultra-deep network input"""
-        frames_list = list(self.frame_stack)
-
-        # Fill missing frames with duplicates of the first frame
-        while len(frames_list) < self.num_frames:
-            if len(frames_list) > 0:
-                frames_list.insert(0, frames_list[0].copy())
-            else:
-                dummy_frame = np.zeros(
-                    (self.target_height, self.target_width, 3), dtype=np.uint8
-                )
-                frames_list.append(dummy_frame)
-
-        # Stack RGB frames: shape will be (27, height, width)
-        # Each frame is (height, width, 3), we want (9*3, height, width)
-        stacked_frames = []
-        for frame in frames_list:
-            # Move channels to first dimension: (3, height, width)
-            frame_chw = np.transpose(frame, (2, 0, 1))
-            stacked_frames.append(frame_chw)
-
-        # Concatenate along channel dimension: (27, height, width)
-        stacked = np.concatenate(stacked_frames, axis=0)
-
-        return stacked
-
-    def _extract_health(self, info):
-        """Extract health information"""
-        player_health = info.get("health", self.full_hp)
-        opponent_health = info.get("enemy_health", self.full_hp)
-        return player_health, opponent_health
-
-    def _calculate_distance_reward(self, current_distance):
-        """Calculate normalized distance-based reward for proper spacing (footsies)"""
-        # Distance penalty - encourages optimal fighting distance
-        distance_diff = abs(self.optimal_distance - current_distance)
-        # Normalize to [-0.1, +0.1] range
-        distance_reward = -self.distance_lambda * (
-            distance_diff / self.optimal_distance
+        # Modify first conv layer to accept our input channels
+        original_conv = self.efficientnet.features[0][0]
+        self.efficientnet.features[0][0] = nn.Conv2d(
+            num_input_channels,
+            original_conv.out_channels,
+            kernel_size=original_conv.kernel_size,
+            stride=original_conv.stride,
+            padding=original_conv.padding,
+            bias=False,
         )
 
-        # Bonus for being in optimal range (normalize to +0.05)
-        if distance_diff < self.optimal_distance * 0.2:  # Within 20% of optimal
-            distance_reward += 0.05
+        # Remove the final classification layer
+        self.efficientnet.classifier = nn.Identity()
 
-        return np.clip(distance_reward, -0.1, 0.1)
+        # Get the number of features from EfficientNet-B3 (1536)
+        efficientnet_features = 1536
 
-    def _update_combo_tracking(self, opponent_damage_dealt, current_time):
-        """Track combo system for progressive rewards"""
-        if opponent_damage_dealt > 0:
-            # Check if this continues a combo
-            if current_time - self.last_hit_time <= self.combo_timeout:
-                self.current_combo_length += 1
-            else:
-                # New combo started
-                if self.current_combo_length > 1:
-                    self.total_combos += 1
-                self.current_combo_length = 1
-
-            self.last_hit_time = current_time
-        else:
-            # Check if combo timed out
-            if current_time - self.last_hit_time > self.combo_timeout:
-                if self.current_combo_length > 1:
-                    self.total_combos += 1
-                self.current_combo_length = 0
-
-    def _calculate_combo_reward(self, opponent_damage_dealt):
-        """Calculate normalized progressive combo rewards"""
-        if opponent_damage_dealt > 0 and self.current_combo_length > 1:
-            # Progressive combo scaling - normalized to [0, 1] range
-            base_reward = min(opponent_damage_dealt / 20.0, 0.3)  # Cap base at 0.3
-            combo_bonus = min(
-                self.combo_multiplier * (self.current_combo_length - 1) * 0.1, 0.5
+        # Add CBAM attention to intermediate features if requested
+        if self.use_cbam:
+            # Add CBAM at multiple stages for better feature refinement
+            self.cbam_blocks = nn.ModuleList(
+                [
+                    CBAM(48),  # After block 2
+                    CBAM(80),  # After block 3
+                    CBAM(160),  # After block 5
+                    CBAM(224),  # After block 6
+                ]
             )
 
-            # Execution bonus for longer combos - normalized
-            execution_bonus = 0.0
-            if self.current_combo_length >= 3:
-                execution_bonus = 0.1
-            if self.current_combo_length >= 5:
-                execution_bonus = 0.2
-
-            total_combo_reward = base_reward + combo_bonus + execution_bonus
-            return min(total_combo_reward, 1.0)  # Cap at 1.0
-        return 0.0
-
-    def _calculate_defensive_reward(self, player_damage_taken, info):
-        """Calculate normalized defensive rewards for blocks and reversals"""
-        defensive_reward = 0.0
-
-        # Check for successful blocking (taking minimal damage while being attacked)
-        if player_damage_taken == 0:
-            # Assume we blocked if opponent was attacking (simplified)
-            opponent_action = info.get("opponent_action", 0)
-            if opponent_action > 0:  # Opponent was attacking
-                self.consecutive_blocks += 1
-                self.total_blocks += 1
-
-                # Progressive blocking rewards - normalized to [0, 1]
-                defensive_reward += 0.1  # Base block reward
-                if self.consecutive_blocks >= 2:
-                    defensive_reward += 0.2  # Consecutive blocks bonus
-                if self.consecutive_blocks >= 4:
-                    defensive_reward += 0.3  # Extended defense bonus
-        else:
-            self.consecutive_blocks = 0
-
-        # Check for potential reversal situations - normalized bonus
-        if player_damage_taken == 0 and self.consecutive_blocks >= 2:
-            # Bonus for maintaining defense under pressure
-            defensive_reward += min(self.defensive_bonus * 0.05, 0.2)
-
-        return min(defensive_reward, 1.0)  # Cap at 1.0
-
-    def _calculate_multi_component_reward(
-        self, curr_player_health, curr_opponent_health, game_state, info
-    ):
-        """Multi-component reward system with normalized values"""
-
-        # Component 1: Sparse win/loss rewards (normalized to [-1, +1])
-        sparse_reward = 0.0
-        done = False
-
-        # Component 2: Dense performance rewards (normalized to [-1, +1])
-        opponent_damage = self.prev_opponent_health - curr_opponent_health
-        player_damage = self.prev_player_health - curr_player_health
-
-        dense_reward = 0.0
-        if opponent_damage > 0:
-            # Normalize damage reward based on max possible damage per hit (~10-20 HP)
-            dense_reward = min(opponent_damage / 15.0, 1.0)  # Cap at 1.0
-        elif player_damage > 0:
-            # Normalize damage penalty
-            dense_reward = -min(player_damage / 15.0, 1.0)  # Cap at -1.0
-
-        # Component 3: Shaped positioning rewards (already normalized to ~[-0.05, +0.1])
-        current_distance = game_state.get("distance", self.optimal_distance)
-        positioning_reward = self._calculate_distance_reward(current_distance)
-
-        # Component 4: Intrinsic exploration rewards (normalize to [0, +1])
-        self._update_combo_tracking(opponent_damage, self.episode_steps)
-        combo_reward = self._calculate_combo_reward(opponent_damage)
-        defensive_reward = self._calculate_defensive_reward(player_damage, info)
-
-        # Normalize exploration rewards to [0, 1] range
-        exploration_reward = min((combo_reward + defensive_reward) / 2.0, 1.0)
-
-        # Check for round end
-        if curr_player_health <= 0 or curr_opponent_health <= 0:
-            self.total_rounds += 1
-
-            if curr_opponent_health <= 0 and curr_player_health > 0:
-                sparse_reward = 1.0  # Normalized win reward
-                self.wins += 1
-                self.win_streak += 1
-                self.best_win_streak = max(self.best_win_streak, self.win_streak)
-                win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
-                print(
-                    f"🏆 WIN! Round {self.total_rounds} | {self.wins}W/{self.losses}L ({win_rate:.1%}) | Streak: {self.win_streak}"
-                )
-
-            elif curr_player_health <= 0 and curr_opponent_health > 0:
-                sparse_reward = -1.0  # Normalized loss penalty
-                self.losses += 1
-                self.win_streak = 0
-                win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
-                print(
-                    f"💀 LOSS! Round {self.total_rounds} | {self.wins}W/{self.losses}L ({win_rate:.1%}) | Streak: 0"
-                )
-
-            if self.reset_round:
-                done = True
-
-            self._log_periodic_stats()
-
-        # Combine all reward components with research-based weights
-        # All components now in similar ranges: [-1, +1] or [0, +1]
-        total_reward = (
-            self.reward_weights["sparse_win_loss"] * sparse_reward
-            + self.reward_weights["dense_performance"] * dense_reward
-            + self.reward_weights["shaped_positioning"] * positioning_reward
-            + self.reward_weights["intrinsic_exploration"] * exploration_reward
-        )
-
-        # Final normalization: ensure total reward is in reasonable range [-2, +2]
-        total_reward = np.clip(total_reward, -2.0, 2.0)
-
-        # Update tracking variables
-        self.prev_player_health = curr_player_health
-        self.prev_opponent_health = curr_opponent_health
-        self.prev_player_x = game_state.get("player_x", self.prev_player_x)
-        self.prev_opponent_x = game_state.get("opponent_x", self.prev_opponent_x)
-
-        return total_reward, done
-
-    def _log_periodic_stats(self):
-        """Enhanced logging with fighting game statistics"""
-        current_time = time.time()
-        time_since_last_log = current_time - self.last_log_time
-
-        if time_since_last_log >= self.log_interval:
-            session_time = current_time - self.session_start
-
-            if self.total_rounds > 0:
-                win_rate = self.wins / self.total_rounds * 100
-                avg_episode_reward = (
-                    np.mean(self.episode_rewards) if self.episode_rewards else 0
-                )
-                avg_episode_length = (
-                    np.mean(self.episode_lengths) if self.episode_lengths else 0
-                )
-
-                # Fighting game specific stats
-                avg_combo_length = self.avg_combo_length
-                blocks_per_round = (
-                    self.total_blocks / self.total_rounds
-                    if self.total_rounds > 0
-                    else 0
-                )
-                combos_per_round = (
-                    self.total_combos / self.total_rounds
-                    if self.total_rounds > 0
-                    else 0
-                )
-
-                if win_rate >= 70:
-                    performance = "🏆 EXCELLENT"
-                elif win_rate >= 50:
-                    performance = "⚔️ GOOD"
-                elif win_rate >= 30:
-                    performance = "📈 IMPROVING"
-                else:
-                    performance = "🎯 LEARNING"
-
-                print(f"\n📊 FIGHTING GAME TRAINING STATS:")
-                print(f"   {performance} | Win Rate: {win_rate:.1f}%")
-                print(
-                    f"   🎮 Rounds: {self.total_rounds} ({self.wins}W/{self.losses}L)"
-                )
-                print(
-                    f"   🔥 Best Streak: {self.best_win_streak} | Current: {self.win_streak}"
-                )
-                print(f"   💰 Avg Reward: {avg_episode_reward:.2f}")
-                print(f"   ⏱️  Avg Episode: {avg_episode_length:.0f} steps")
-                print(f"   🥊 Combos/Round: {combos_per_round:.1f}")
-                print(f"   🛡️ Blocks/Round: {blocks_per_round:.1f}")
-                print(f"   🕐 Session: {session_time/60:.1f} min")
-                print(f"   📈 Total Steps: {self.total_steps:,}")
-                print()
-
-            self.last_log_time = current_time
-
-    def reset(self, **kwargs):
-        """Reset environment for new episode"""
-        observation, info = self.env.reset(**kwargs)
-
-        # Reset health tracking
-        self.prev_player_health = self.full_hp
-        self.prev_opponent_health = self.full_hp
-
-        # Reset fighting game specific tracking
-        self.current_combo_length = 0
-        self.consecutive_blocks = 0
-        self.last_hit_time = 0
-        self.last_block_time = 0
-
-        # Track episode statistics
-        if hasattr(self, "episode_reward"):
-            self.episode_rewards.append(self.episode_reward)
-        if hasattr(self, "episode_steps"):
-            self.episode_lengths.append(self.episode_steps)
-
-        self.episode_steps = 0
-        self.episode_reward = 0.0
-        self.total_episodes += 1
-
-        # Initialize frame stack
-        self.frame_stack.clear()
-        processed_frame = self._process_frame(observation)
-        self.frame_stack.append(processed_frame.copy())
-
-        # Fill frame stack with initial frame
-        for _ in range(self.num_frames - 1):
-            self.frame_stack.append(processed_frame.copy())
-
-        stacked_obs = self._stack_observation()
-        return stacked_obs, info
-
-    def step(self, action):
-        """Enhanced step with multi-component rewards and fighting game optimizations"""
-
-        # Simple action handling - expect MultiBinary format
-        try:
-            if isinstance(action, np.ndarray) and action.shape == (12,):
-                # Correct MultiBinary format
-                final_action = action.astype(np.int32)
-            elif isinstance(action, np.ndarray) and action.size == 12:
-                # Reshape if needed
-                final_action = action.reshape(12).astype(np.int32)
-            else:
-                print(f"⚠️ Expected MultiBinary action with 12 elements, got: {action}")
-                print(
-                    f"   Type: {type(action)}, Shape: {getattr(action, 'shape', 'N/A')}"
-                )
-                # Use no-op action as fallback
-                final_action = np.zeros(12, dtype=np.int32)
-
-        except Exception as e:
-            print(f"❌ Action processing failed: {e}")
-            final_action = np.zeros(12, dtype=np.int32)
-
-        # Execute action in environment
-        try:
-            result = self.env.step(final_action)
-
-            # Handle gymnasium return format
-            if len(result) == 5:
-                observation, reward, terminated, truncated, info = result
-                done = terminated or truncated
-            elif len(result) == 4:
-                observation, reward, done, info = result
-                truncated = False
-            else:
-                raise ValueError(f"Unexpected step return length: {len(result)}")
-
-        except Exception as e:
-            print(f"❌ Environment step failed: {e}")
-            print(f"   Action: {final_action} (type: {type(final_action)})")
-
-            # Return emergency fallback values
-            dummy_obs = np.zeros(
-                (self.target_height, self.target_width, 3), dtype=np.uint8
+        # Multi-Head Spatial Attention
+        if self.use_spatial_attention:
+            self.spatial_attention = MultiHeadSpatialAttention(
+                embed_dim=efficientnet_features,
+                num_heads=num_attention_heads,
+                dropout=dropout,
             )
-            self.frame_stack.append(dummy_obs)
-            stacked_obs = self._stack_observation()
-            return stacked_obs, -1.0, True, True, {"error": str(e)}
 
-        # Extract enhanced game state and calculate multi-component reward
-        game_state = self._extract_game_state(info)
-        curr_player_health, curr_opponent_health = self._extract_health(info)
-
-        custom_reward, custom_done = self._calculate_multi_component_reward(
-            curr_player_health, curr_opponent_health, game_state, info
+        # Feature fusion and projection
+        self.feature_projection = nn.Sequential(
+            nn.Conv2d(efficientnet_features, 1024, 3, padding=1),
+            nn.BatchNorm2d(1024),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(1024, features_dim),
+            nn.ReLU(inplace=True),
+            nn.Dropout(dropout),
         )
 
-        if custom_done:
-            done = custom_done
+        print(f"🧠 EFFICIENTNET-B3 + MULTI-HEAD ATTENTION:")
+        print(f"   📊 Input channels: {num_input_channels}")
+        print(f"   🎯 Output features: {features_dim}")
+        print(f"   👁️ Attention heads: {num_attention_heads}")
+        print(f"   🔍 CBAM enabled: {use_cbam}")
+        print(f"   🎨 Spatial attention: {use_spatial_attention}")
+        print(f"   💫 Optimized for fighting game pattern recognition")
 
-        # Process frame and update stack
-        processed_frame = self._process_frame(observation)
-        self.frame_stack.append(processed_frame)
-        stacked_obs = self._stack_observation()
+    def forward(self, x):
+        # Input normalization (EfficientNet expects [0,1] range)
+        x = x.float() / 255.0
 
-        # Update episode tracking
-        self.episode_steps += 1
-        self.total_steps += 1
-        self.episode_reward += custom_reward
+        features = []
 
-        # Check for episode timeout
-        if self.episode_steps >= self.max_episode_steps:
-            truncated = True
-            print(f"⏰ Episode timeout at {self.episode_steps} steps")
+        # Pass through EfficientNet backbone with intermediate feature extraction
+        for i, layer in enumerate(self.efficientnet.features):
+            x = layer(x)
 
-        return stacked_obs, custom_reward, done, truncated, info
+            # Collect features for CBAM attention at specific layers
+            if self.use_cbam:
+                if i == 2:  # After block 2 (48 channels)
+                    x = self.cbam_blocks[0](x)
+                elif i == 3:  # After block 3 (80 channels)
+                    x = self.cbam_blocks[1](x)
+                elif i == 5:  # After block 5 (160 channels)
+                    x = self.cbam_blocks[2](x)
+                elif i == 6:  # After block 6 (224 channels)
+                    x = self.cbam_blocks[3](x)
 
-    def close(self):
-        """Clean shutdown with enhanced fighting game statistics"""
-        print(f"\n🏁 FINAL FIGHTING GAME STATISTICS:")
+        # Average pooling as in original EfficientNet
+        x = self.efficientnet.avgpool(x)
 
-        if self.total_rounds > 0:
-            final_win_rate = self.wins / self.total_rounds * 100
-            session_time = time.time() - self.session_start
+        # Apply Multi-Head Spatial Attention if enabled
+        if self.use_spatial_attention and x.size(2) > 1 and x.size(3) > 1:
+            # Only apply if we have spatial dimensions > 1x1
+            x = self.spatial_attention(x)
 
-            print(f"   🎯 Final Win Rate: {final_win_rate:.1f}%")
-            print(f"   🎮 Total Rounds: {self.total_rounds}")
-            print(f"   🏆 Wins: {self.wins}")
-            print(f"   💀 Losses: {self.losses}")
-            print(f"   🔥 Best Win Streak: {self.best_win_streak}")
-            print(f"   📊 Total Episodes: {self.total_episodes}")
-            print(f"   📈 Total Steps: {self.total_steps:,}")
-            print(f"   🥊 Total Combos: {self.total_combos}")
-            print(f"   🛡️ Total Blocks: {self.total_blocks}")
-            print(f"   🕐 Session Time: {session_time/3600:.2f} hours")
+        # Final feature projection
+        features = self.feature_projection(x)
 
-            if self.episode_rewards:
-                print(f"   💰 Avg Episode Reward: {np.mean(self.episode_rewards):.2f}")
-                print(
-                    f"   📏 Avg Episode Length: {np.mean(self.episode_lengths):.0f} steps"
-                )
+        return features
 
-            if final_win_rate >= 70:
-                summary = "🏆 EXCELLENT FIGHTING GAME PERFORMANCE!"
-            elif final_win_rate >= 50:
-                summary = "⚔️ GOOD FIGHTING GAME PERFORMANCE!"
-            elif final_win_rate >= 30:
-                summary = "📈 SOLID FIGHTING GAME IMPROVEMENT!"
-            else:
-                summary = "🎯 GOOD FIGHTING GAME LEARNING PROGRESS!"
+    def get_attention_maps(self, x):
+        """Extract attention maps for visualization"""
+        x = x.float() / 255.0
+        attention_maps = {}
 
-            print(f"   {summary}")
-            print(f"   ⚔️ Multi-component reward system active")
-            print(f"   🎯 Distance-based spacing rewards implemented")
-            print(f"   🥊 Progressive combo system active")
-            print(f"   🛡️ Defensive action rewards implemented")
+        # CBAM attention maps
+        if self.use_cbam:
+            for i, layer in enumerate(self.efficientnet.features):
+                x = layer(x)
 
-        super().close()
+                if i == 2:
+                    ca_map = self.cbam_blocks[0].channel_attention(x)
+                    sa_map = self.cbam_blocks[0].spatial_attention(x)
+                    attention_maps["cbam_block2"] = {
+                        "channel": ca_map,
+                        "spatial": sa_map,
+                    }
+                    x = self.cbam_blocks[0](x)
+                elif i == 3:
+                    ca_map = self.cbam_blocks[1].channel_attention(x)
+                    sa_map = self.cbam_blocks[1].spatial_attention(x)
+                    attention_maps["cbam_block3"] = {
+                        "channel": ca_map,
+                        "spatial": sa_map,
+                    }
+                    x = self.cbam_blocks[1](x)
+                elif i == 5:
+                    ca_map = self.cbam_blocks[2].channel_attention(x)
+                    sa_map = self.cbam_blocks[2].spatial_attention(x)
+                    attention_maps["cbam_block5"] = {
+                        "channel": ca_map,
+                        "spatial": sa_map,
+                    }
+                    x = self.cbam_blocks[2](x)
+                elif i == 6:
+                    ca_map = self.cbam_blocks[3].channel_attention(x)
+                    sa_map = self.cbam_blocks[3].spatial_attention(x)
+                    attention_maps["cbam_block6"] = {
+                        "channel": ca_map,
+                        "spatial": sa_map,
+                    }
+                    x = self.cbam_blocks[3](x)
 
-    @property
-    def current_stats(self):
-        """Return current enhanced training statistics"""
-        win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
-        avg_reward = np.mean(self.episode_rewards) if self.episode_rewards else 0
+        x = self.efficientnet.avgpool(x)
 
-        return {
-            "win_rate": win_rate,
-            "wins": self.wins,
-            "losses": self.losses,
-            "total_rounds": self.total_rounds,
-            "win_streak": self.win_streak,
-            "best_win_streak": self.best_win_streak,
-            "avg_episode_reward": avg_reward,
-            "total_episodes": self.total_episodes,
-            "total_steps": self.total_steps,
-            "total_combos": self.total_combos,
-            "total_blocks": self.total_blocks,
-            "avg_combo_length": self.avg_combo_length,
-        }
+        # Multi-head spatial attention maps would require modification to the attention module
+        # to return attention weights - omitted for brevity
+
+        return attention_maps
+
+
+class EfficientNetB3FeatureExtractor(EfficientNetMultiHeadAttention):
+    """Simplified interface matching the original DeepCNNFeatureExtractor"""
+
+    def __init__(self, observation_space, features_dim: int = 512):
+        # Extract input channels from observation space
+        num_input_channels = observation_space.shape[0]
+
+        super().__init__(
+            num_input_channels=num_input_channels,
+            features_dim=features_dim,
+            num_attention_heads=8,
+            use_cbam=True,
+            use_spatial_attention=True,
+            dropout=0.1,
+        )
+
+        print(f"🚀 FIGHTING GAME FEATURE EXTRACTOR:")
+        print(f"   📊 Observation space: {observation_space.shape}")
+        print(f"   🎯 Features output: {features_dim}")
+        print(f"   🧠 Architecture: EfficientNet-B3 + Multi-Head Attention + CBAM")
+        print(f"   ⚔️ Optimized for fighting game temporal patterns")
+
+
+# Example usage and testing
+if __name__ == "__main__":
+    # Test the feature extractor
+    import gymnasium as gym
+
+    # Simulate fighting game observation space (27 channels, 126x180)
+    observation_space = gym.spaces.Box(
+        low=0, high=255, shape=(27, 126, 180), dtype="uint8"
+    )
+
+    # Create the feature extractor
+    feature_extractor = EfficientNetB3FeatureExtractor(
+        observation_space=observation_space, features_dim=512
+    )
+
+    # Test with dummy input
+    batch_size = 4
+    dummy_input = torch.randint(0, 256, (batch_size, 27, 126, 180), dtype=torch.float32)
+
+    print(f"\n🔬 TESTING:")
+    print(f"   Input shape: {dummy_input.shape}")
+
+    with torch.no_grad():
+        features = feature_extractor(dummy_input)
+        print(f"   Output shape: {features.shape}")
+        print(f"   ✅ Feature extraction successful!")
+
+        # Test attention map extraction
+        attention_maps = feature_extractor.get_attention_maps(dummy_input[:1])
+        print(f"   📊 Attention maps extracted: {len(attention_maps)} layers")
+
+    # Memory usage estimation
+    total_params = sum(p.numel() for p in feature_extractor.parameters())
+    trainable_params = sum(
+        p.numel() for p in feature_extractor.parameters() if p.requires_grad
+    )
+
+    print(f"\n📊 MODEL STATISTICS:")
+    print(f"   Total parameters: {total_params:,}")
+    print(f"   Trainable parameters: {trainable_params:,}")
+    print(f"   Model size: ~{total_params * 4 / (1024**2):.1f} MB (FP32)")
+    print(f"   🎯 Ready for fighting game RL training!")
