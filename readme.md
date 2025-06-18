@@ -4,7 +4,7 @@
 
 
 
-python train.py --resume trained_models_simple/ppo_simple_10150000_steps.zip --render --total-timesteps 10000000  --learning-rate 3e-4
+python train.py --resume trained_models_fighting_optimized/ppo_fighting_optimized_16950000_steps.zip --render --total-timesteps 10000000  --learning-rate 1e-4
 
 
 
