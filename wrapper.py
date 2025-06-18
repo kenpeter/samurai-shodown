@@ -139,7 +139,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         }
 
     def _calculate_reward(self, game_info, info):
-        """Multi-component reward system for fighting games with normalization"""
+        """Multi-component reward system for fighting games with AGGRESSIVE normalization"""
         reward = 0.0
 
         player_health = game_info["player_health"]
@@ -150,36 +150,41 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.prev_player_health = player_health
             self.prev_enemy_health = enemy_health
 
-        # 1. Health difference rewards/penalties (NORMALIZED)
+        # 1. Health difference rewards/penalties (BOOSTED REWARDS)
         health_diff = self.prev_player_health - player_health
         enemy_health_diff = self.prev_enemy_health - enemy_health
 
-        # Normalize health changes by max health (128)
-        # Reward for damaging enemy (0 to +1.0 range)
+        # Normalize health changes by max health (128) - INCREASED MULTIPLIERS
+        # Reward for damaging enemy (0 to +3.0 range) - BOOSTED
         if enemy_health_diff > 0:
             normalized_enemy_damage = enemy_health_diff / self.full_hp
-            reward += normalized_enemy_damage * 2.0  # Scale to make it significant
+            reward += normalized_enemy_damage * 5.0  # INCREASED from 2.0 to 5.0
 
-        # Penalty for taking damage (0 to -1.0 range)
+        # Penalty for taking damage (0 to -1.5 range) - REDUCED PENALTY
         if health_diff > 0:
             normalized_player_damage = health_diff / self.full_hp
-            reward -= normalized_player_damage * 1.0  # Penalty is less than reward
+            reward -= normalized_player_damage * 0.5  # REDUCED from 1.0 to 0.5
 
-        # 2. Health advantage bonus (NORMALIZED)
+        # 2. Health advantage bonus (BOOSTED)
         # Normalize health advantage to [-1, +1] range
         health_advantage = (player_health - enemy_health) / self.full_hp
-        reward += health_advantage * 0.1  # Small continuous advantage bonus
+        reward += health_advantage * 0.3  # INCREASED from 0.1 to 0.3
 
-        # 3. Health percentage bonus (NORMALIZED)
-        # Bonus for maintaining high health
+        # 3. Aggressive play bonus (NEW)
+        # Reward for being aggressive when ahead
+        if player_health > enemy_health and enemy_health_diff > 0:
+            aggression_bonus = 0.5  # Bonus for aggressive play when winning
+            reward += aggression_bonus
+
+        # 4. Health percentage rewards (INCREASED)
         player_health_ratio = player_health / self.full_hp
         enemy_health_ratio = enemy_health / self.full_hp
 
-        # Reward for having high health, penalty for low health
-        reward += (player_health_ratio - 0.5) * 0.05  # Range: -0.025 to +0.025
-        reward -= (enemy_health_ratio - 0.5) * 0.05  # Penalty if enemy has high health
+        # Stronger rewards for maintaining high health
+        reward += (player_health_ratio - 0.5) * 0.2  # INCREASED from 0.05
+        reward -= (enemy_health_ratio - 0.5) * 0.2  # INCREASED penalty
 
-        # 4. Round completion rewards (NORMALIZED)
+        # 5. Round completion rewards (SIGNIFICANTLY BOOSTED)
         current_round = game_info.get("current_round", 1)
 
         # Simple round end detection based on very low health
@@ -187,9 +192,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         if round_over:
             if player_health > enemy_health:
-                # Win bonus: larger bonus for decisive wins
+                # MASSIVE win bonus: much larger bonus for decisive wins
                 health_ratio_advantage = (player_health - enemy_health) / self.full_hp
-                win_bonus = 5.0 + (health_ratio_advantage * 2.0)  # 5.0 to 7.0 range
+                win_bonus = 15.0 + (
+                    health_ratio_advantage * 5.0
+                )  # BOOSTED: 15.0 to 20.0 range
                 reward += win_bonus
 
                 self.current_stats["wins"] += 1
@@ -199,20 +206,20 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     self.current_stats["current_win_streak"],
                 )
             elif enemy_health > player_health:
-                # Loss penalty: smaller penalty for close losses
+                # REDUCED loss penalty for better exploration
                 health_ratio_disadvantage = (
                     enemy_health - player_health
                 ) / self.full_hp
-                loss_penalty = -2.0 - (
+                loss_penalty = -3.0 - (
                     health_ratio_disadvantage * 1.0
-                )  # -2.0 to -3.0 range
+                )  # REDUCED from -2.0 base
                 reward += loss_penalty
 
                 self.current_stats["losses"] += 1
                 self.current_stats["current_win_streak"] = 0
             else:
                 # Draw - small penalty to encourage decisive play
-                reward -= 1.0
+                reward -= 0.5  # REDUCED from -1.0
 
             self.current_stats["total_rounds"] += 1
             if self.current_stats["total_rounds"] > 0:
@@ -220,23 +227,30 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     self.current_stats["wins"] / self.current_stats["total_rounds"]
                 )
 
-        # 5. Time penalty (NORMALIZED)
-        # Small time penalty to encourage action, normalized by episode length
-        time_penalty = -0.001  # Very small penalty per step
+        # 6. Time penalty (REDUCED)
+        # Very small time penalty to encourage action
+        time_penalty = -0.0005  # REDUCED from -0.001
         reward += time_penalty
 
-        # 6. Survival bonus (NORMALIZED)
-        # Small bonus for staying alive, scaled by remaining health
+        # 7. Survival bonus (INCREASED)
+        # Larger bonus for staying alive
         if player_health > 0:
-            survival_bonus = (player_health / self.full_hp) * 0.002  # 0 to 0.002 range
+            survival_bonus = (
+                player_health / self.full_hp
+            ) * 0.01  # INCREASED from 0.002
             reward += survival_bonus
+
+        # 8. Action diversity bonus (NEW)
+        # Small bonus to encourage varied actions (prevent button mashing)
+        action_diversity_bonus = 0.001
+        reward += action_diversity_bonus
 
         # Update previous values
         self.prev_player_health = player_health
         self.prev_enemy_health = enemy_health
 
-        # Clip final reward to reasonable range to prevent extreme values
-        reward = max(-10.0, min(10.0, reward))
+        # Clip final reward to wider range for stronger signals
+        reward = max(-25.0, min(25.0, reward))  # INCREASED from [-10, 10] to [-25, 25]
 
         return reward
 

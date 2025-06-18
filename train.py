@@ -262,8 +262,8 @@ def main():
     parser = argparse.ArgumentParser(description="Improved Samurai Showdown Training")
     parser.add_argument("--total-timesteps", type=int, default=10000000)
     parser.add_argument(
-        "--learning-rate", type=float, default=3e-4
-    )  # Increased from 2e-4
+        "--learning-rate", type=float, default=5e-4  # INCREASED for faster learning
+    )
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--use-default-state", action="store_true")
@@ -514,13 +514,13 @@ def main():
             verbose=1,
             n_steps=n_steps,
             batch_size=batch_size,
-            n_epochs=4,  # Standard epochs
-            gamma=0.995,  # Slightly higher for long-term planning
+            n_epochs=6,  # INCREASED from 4 for better learning
+            gamma=0.99,  # STANDARD gamma for better immediate rewards
             learning_rate=lr_schedule,
             clip_range=linear_schedule(
-                0.12, 0.05
-            ),  # Tighter clipping for fighting games
-            ent_coef=0.02,  # Increased for better exploration in adversarial environments
+                0.15, 0.05
+            ),  # INCREASED from 0.12 for more aggressive updates
+            ent_coef=0.05,  # INCREASED from 0.02 for more exploration
             vf_coef=0.5,
             max_grad_norm=0.5,
             gae_lambda=0.95,
