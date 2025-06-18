@@ -21,7 +21,6 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 # Import the wrapper and ALL feature extractors
 from wrapper import (
     SamuraiShowdownCustomWrapper,
-    UltraLightCNNFeatureExtractor,
     EfficientNetB2FeatureExtractor,  # NEW: Import B2 extractor
 )
 
@@ -442,10 +441,6 @@ def main():
         feature_extractor_class = EfficientNetB2FeatureExtractor  # NEW: B2 support
         print(f"🧠 Using EFFICIENTNET-B2 (~10-14GB VRAM - Optimal Balance)")
         features_dim = 512
-    elif args.model_size == "ultra-light":
-        feature_extractor_class = UltraLightCNNFeatureExtractor
-        print(f"🧠 Using ULTRA-LIGHT CNN (~1GB VRAM - safest for 11GB GPU)")
-        features_dim = 256
     elif args.model_size == "lightweight":
         feature_extractor_class = (
             DeepCNNFeatureExtractor  # UPDATED: Use Deep CNN for lightweight
