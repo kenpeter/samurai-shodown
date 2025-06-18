@@ -3,14 +3,11 @@
 
 
 
-
-python train.py --resume trained_models_simple/ppo_simple_10150000_steps.zip --render --total-timesteps 10000000  --learning-rate 3e-4
-
+python train.py --model-size ultra-light --target-vram 9.0 --batch-size 512 --n-steps 256 --total-timesteps 100000000 --learning-rate 4e-4 --resume trained_models_fighting_optimized/ppo_fighting_optimized_20900000_steps.zip 
 
 
 
-python train.py --model-size ultra-light --target-vram 9.0 --batch-size 512 --n-steps 256 --total-timesteps 100000000 --learning-rate 4e-4
-
+python train.py --model-size ultra-light --target-vram 9.0 --batch-size 512 --n-steps 256 --total-timesteps 100000000 --learning-rate 4e-4 --render
 
 
 

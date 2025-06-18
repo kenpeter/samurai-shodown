@@ -41,6 +41,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.frame_skip = frame_skip
         self.target_size = target_size
 
+        # Health constants
+        self.full_hp = 128
+
         # Performance tracking
         self.current_stats = {
             "wins": 0,
@@ -59,9 +62,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Game state tracking
         self.prev_player_health = None
         self.prev_enemy_health = None
-        self.prev_player_x = None
-        self.prev_enemy_x = None
-        self.prev_distance = None
 
         # Frame buffer for stacking
         self.frame_buffer = deque(maxlen=self.frame_stack)
@@ -119,87 +119,60 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         return stacked
 
-    def _extract_game_info(self, info=None):
-        """Extract game state information from environment"""
-        # For now, use fallback values since RAM reading is game-specific
-        # In a real implementation, you'd need to find the correct RAM addresses
-        # for Samurai Showdown specifically
+    def _extract_game_state(self, info):
+        """Extract enhanced game state information for fighting games"""
+        # Basic health information
+        player_health = info.get("health", self.full_hp)
+        opponent_health = info.get("enemy_health", self.full_hp)
 
-        try:
-            # Try to get some basic info if available
-            ram = self.env.unwrapped.data
+        # Round information
+        current_round = info.get("round", 1)
 
-            # Use safe fallback values for now
-            # TODO: Find correct RAM addresses for Samurai Showdown
-            player_health = 100  # Could be extracted from specific RAM address
-            enemy_health = 100  # Could be extracted from specific RAM address
-            player_x = 80  # Could be extracted from specific RAM address
-            enemy_x = 240  # Could be extracted from specific RAM address
-            round_over = False  # Could be determined from game state
+        # Score information
+        score = info.get("score", 0)
 
-            return {
-                "player_health": player_health,
-                "enemy_health": enemy_health,
-                "player_x": player_x,
-                "enemy_x": enemy_x,
-                "round_over": round_over,
-            }
-
-        except Exception as e:
-            # Safe fallback values
-            return {
-                "player_health": 100,
-                "enemy_health": 100,
-                "player_x": 80,
-                "enemy_x": 240,
-                "round_over": False,
-            }
+        return {
+            "player_health": player_health,
+            "opponent_health": opponent_health,
+            "current_round": current_round,
+            "score": score,
+        }
 
     def _calculate_reward(self, game_info, info):
         """Multi-component reward system for fighting games"""
         reward = 0.0
 
         player_health = game_info["player_health"]
-        enemy_health = game_info["enemy_health"]
-        player_x = game_info["player_x"]
-        enemy_x = game_info["enemy_x"]
+        enemy_health = game_info["opponent_health"]
 
         # Initialize previous values if first step
         if self.prev_player_health is None:
             self.prev_player_health = player_health
             self.prev_enemy_health = enemy_health
-            self.prev_player_x = player_x
-            self.prev_enemy_x = enemy_x
-            self.prev_distance = abs(player_x - enemy_x)
 
-        # 1. health diff
+        # 1. Health difference rewards/penalties
         health_diff = self.prev_player_health - player_health
         enemy_health_diff = self.prev_enemy_health - enemy_health
 
-        # damage enemy reward
+        # Reward for damaging enemy
         if enemy_health_diff > 0:
             reward += enemy_health_diff * 0.1
 
-        # take damage no no
+        # Penalty for taking damage
         if health_diff > 0:
             reward -= health_diff * 0.05
 
-        # 2. distnace change
-        current_distance = abs(player_x - enemy_x)
-        distance_change = self.prev_distance - current_distance
+        # 2. Health advantage bonus
+        health_advantage = player_health - enemy_health
+        reward += health_advantage * 0.001
 
-        # closer enemy reward
-        if distance_change > 0:
-            reward += distance_change * 0.001
+        # 3. Round completion rewards (if round info available)
+        current_round = game_info.get("current_round", 1)
 
-        # 3. being corner, no no
-        # Slight penalty for being at screen edges
-        screen_width = 320  # Approximate screen width
-        if player_x < 20 or player_x > screen_width - 20:
-            reward -= 0.005
+        # Simple round end detection based on very low health
+        round_over = player_health <= 0 or enemy_health <= 0
 
-        # 4. win lose
-        if game_info["round_over"]:
+        if round_over:
             if player_health > enemy_health:
                 reward += 10.0  # Win round
                 self.current_stats["wins"] += 1
@@ -219,15 +192,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     self.current_stats["wins"] / self.current_stats["total_rounds"]
                 )
 
-        # 5. time base penality
+        # 4. Small time penalty to encourage action
         reward -= 0.001
 
         # Update previous values
         self.prev_player_health = player_health
         self.prev_enemy_health = enemy_health
-        self.prev_player_x = player_x
-        self.prev_enemy_x = enemy_x
-        self.prev_distance = current_distance
 
         return reward
 
@@ -239,11 +209,15 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             return True
 
         # 2. Round is over (if reset_round is False)
-        if not self.reset_round and game_info["round_over"]:
+        player_health = game_info["player_health"]
+        opponent_health = game_info["opponent_health"]
+
+        round_over = player_health <= 0 or opponent_health <= 0
+        if not self.reset_round and round_over:
             return True
 
-        # 3. Both players have very low health
-        if game_info["player_health"] <= 0 and game_info["enemy_health"] <= 0:
+        # 3. Both players have no health left
+        if player_health <= 0 and opponent_health <= 0:
             return True
 
         return False
@@ -257,9 +231,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.episode_count += 1
         self.prev_player_health = None
         self.prev_enemy_health = None
-        self.prev_player_x = None
-        self.prev_enemy_x = None
-        self.prev_distance = None
         self.current_stats["current_episode_reward"] = 0.0
 
         # Reset frame buffer
@@ -291,7 +262,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.frame_buffer.append(processed_frame)
 
         # Get game information
-        game_info = self._extract_game_info(info)
+        game_info = self._extract_game_state(info)
 
         # Calculate custom reward
         custom_reward = self._calculate_reward(game_info, info)
