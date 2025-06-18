@@ -18,13 +18,11 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.policies import ActorCriticCnnPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-# Import the wrapper and enhanced feature extractor
+# Import the wrapper and ALL feature extractors
 from wrapper import (
     SamuraiShowdownCustomWrapper,
-    EfficientNetB3FeatureExtractor,
-    LightweightEfficientNetFeatureExtractor,
     UltraLightCNNFeatureExtractor,
-    HighPerformanceEfficientNetB3FeatureExtractor,  # This is now the FIXED version
+    EfficientNetB2FeatureExtractor,  # NEW: Import B2 extractor
 )
 
 
@@ -270,14 +268,16 @@ def main():
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--use-default-state", action="store_true")
     parser.add_argument(
-        "--target-vram", type=float, default=20.0
-    )  # Increased default for high-performance mode
+        "--target-vram",
+        type=float,
+        default=12.0,  # UPDATED: More reasonable default for B2
+    )
     parser.add_argument(
         "--n-steps", type=int, default=512
     )  # Increased for better performance
     parser.add_argument(
-        "--batch-size", type=int, default=2048
-    )  # Much larger batch size for high-end GPUs
+        "--batch-size", type=int, default=512  # UPDATED: More reasonable default for B2
+    )
     parser.add_argument(
         "--mixed-precision", action="store_true", help="Enable mixed precision training"
     )
@@ -290,9 +290,15 @@ def main():
     parser.add_argument(
         "--model-size",
         type=str,
-        default="high-performance",
-        choices=["ultra-light", "lightweight", "full", "basic", "high-performance"],
-        help="Model size: ultra-light (~1GB), lightweight (EfficientNet-B0 ~3GB), full (EfficientNet-B3 ~12GB), basic (custom CNN ~2GB), high-performance (Enhanced B3 ~20GB+)",
+        default="efficientnet-b2",  # UPDATED: B2 as default
+        choices=[
+            "ultra-light",
+            "lightweight",
+            "full",
+            "basic",
+            "efficientnet-b2",
+        ],  # UPDATED: Added B2
+        help="Model size: ultra-light (~1GB), lightweight (custom CNN ~2GB), full (custom deep CNN ~3GB), basic (custom CNN ~2GB), efficientnet-b2 (ImageNet B2 ~10-14GB)",
     )
 
     args = parser.parse_args()
@@ -308,11 +314,12 @@ def main():
     print(f"🚀 IMPROVED SAMURAI TRAINING (Fighting Game Optimized)")
     print(f"   💻 Device: {device}")
     print(f"   🎨 RGB Processing: 9 frames × 3 channels = 27 input channels")
-    print(f"   🎯 Multi-component reward system: distance + combo + defensive")
+    print(f"   🎯 Multi-component reward system: health-based optimized")
     print(f"   🧠 Model size: {args.model_size}")
-    print(f"   🚀 HIGH PERFORMANCE MODE: Designed for maximum VRAM usage")
+    if args.model_size == "efficientnet-b2":
+        print(f"   🚀 EFFICIENTNET-B2 MODE: Optimal balance for 11GB GPUs")
     print(
-        f"   📊 High-end hyperparameters: n_steps={args.n_steps}, batch_size={args.batch_size}"
+        f"   📊 Optimized hyperparameters: n_steps={args.n_steps}, batch_size={args.batch_size}"
     )
     print(f"   🛡️ Memory allocated for {args.target_vram}GB VRAM")
     if args.mixed_precision:
@@ -390,7 +397,7 @@ def main():
     print(f"   💪 Batch size: {batch_size:,} (optimized for fighting games)")
     print(f"   📏 N-steps: {n_steps:,} (balanced for better policy updates)")
     print(f"   🌈 RGB channels: 27 (9 frames × 3 RGB)")
-    print(f"   🎯 Multi-component reward system")
+    print(f"   🎯 Health-based reward system")
     print(f"   🎪 PPO clip epsilon: 0.12 (tighter for adversarial environments)")
 
     # Create environment with improved wrapper
@@ -430,45 +437,41 @@ def main():
     vram_before = torch.cuda.memory_allocated() / (1024**3) if device == "cuda" else 0
     print(f"   VRAM before model: {vram_before:.2f} GB")
 
-    # Select feature extractor based on model size - NOW USES FIXED VERSIONS
-    if args.model_size == "high-performance":
-        feature_extractor_class = (
-            HighPerformanceEfficientNetB3FeatureExtractor  # FIXED VERSION
-        )
-        print(
-            f"🧠 Using FIXED HIGH-PERFORMANCE EfficientNet-B3 (~20GB+ VRAM - MAXIMUM POWER)"
-        )
-        features_dim = 1024  # Larger feature dimension
+    # UPDATED: Select feature extractor based on model size - NOW WITH B2 SUPPORT
+    if args.model_size == "efficientnet-b2":
+        feature_extractor_class = EfficientNetB2FeatureExtractor  # NEW: B2 support
+        print(f"🧠 Using EFFICIENTNET-B2 (~10-14GB VRAM - Optimal Balance)")
+        features_dim = 512
     elif args.model_size == "ultra-light":
         feature_extractor_class = UltraLightCNNFeatureExtractor
         print(f"🧠 Using ULTRA-LIGHT CNN (~1GB VRAM - safest for 11GB GPU)")
         features_dim = 256
     elif args.model_size == "lightweight":
-        feature_extractor_class = LightweightEfficientNetFeatureExtractor
-        print(f"🧠 Using LIGHTWEIGHT EfficientNet-B0 (~3GB VRAM)")
+        feature_extractor_class = (
+            DeepCNNFeatureExtractor  # UPDATED: Use Deep CNN for lightweight
+        )
+        print(f"🧠 Using LIGHTWEIGHT Custom CNN (~2GB VRAM)")
         features_dim = 512
     elif args.model_size == "full":
-        feature_extractor_class = EfficientNetB3FeatureExtractor
-        print(f"🧠 Using FULL EfficientNet-B3 (~12GB VRAM)")
+        feature_extractor_class = (
+            DeepCNNFeatureExtractor  # UPDATED: Use Deep CNN for full
+        )
+        print(f"🧠 Using FULL Custom CNN (~3GB VRAM)")
         features_dim = 512
     else:  # basic
         feature_extractor_class = DeepCNNFeatureExtractor
         print(f"🧠 Using BASIC CNN (~2GB VRAM)")
         features_dim = 512
 
-    # Optimize batch size for high-performance mode
-    if args.model_size == "high-performance":
-        # For high-performance, use larger batch sizes if VRAM allows
-        if args.target_vram >= 24.0 and batch_size < 4096:
-            batch_size = min(4096, total_buffer_size)
-            print(
-                f"📊 Increased batch size to {batch_size} for high-performance mode (24GB+ VRAM)"
-            )
-        elif args.target_vram >= 20.0 and batch_size < 2048:
-            batch_size = min(2048, total_buffer_size)
-            print(
-                f"📊 Increased batch size to {batch_size} for high-performance mode (20GB+ VRAM)"
-            )
+    # Optimize batch size for B2 mode
+    if args.model_size == "efficientnet-b2":
+        # For B2, optimize batch sizes based on VRAM
+        if args.target_vram >= 14.0 and batch_size < 1024:
+            batch_size = min(1024, total_buffer_size)
+            print(f"📊 Increased batch size to {batch_size} for B2 mode (14GB+ VRAM)")
+        elif args.target_vram >= 12.0 and batch_size < 512:
+            batch_size = min(512, total_buffer_size)
+            print(f"📊 Optimized batch size to {batch_size} for B2 mode (12GB+ VRAM)")
     elif args.model_size == "ultra-light" and batch_size > 64:
         batch_size = 64
         print(
@@ -490,11 +493,11 @@ def main():
             args.learning_rate, args.learning_rate * 0.1, args.lr_schedule
         )
 
-        # Use larger networks for high-performance mode
-        if args.model_size == "high-performance":
+        # Use optimized networks for B2 mode
+        if args.model_size == "efficientnet-b2":
             net_arch = dict(
-                pi=[1024, 512, 256, 128],  # Deeper policy network
-                vf=[1024, 512, 256, 128],  # Deeper value network
+                pi=[768, 384, 192],  # Optimized for B2
+                vf=[768, 384, 192],  # Optimized for B2
             )
         elif args.model_size == "ultra-light":
             net_arch = dict(pi=[256, 128], vf=[256, 128])  # Smaller networks
@@ -506,11 +509,9 @@ def main():
             env,
             device=device,
             verbose=1,
-            n_steps=n_steps,  # Higher for performance mode
-            batch_size=batch_size,  # Much larger for high-end GPUs
-            n_epochs=(
-                6 if args.model_size == "high-performance" else 4
-            ),  # More epochs for complex model
+            n_steps=n_steps,
+            batch_size=batch_size,
+            n_epochs=4,  # Standard epochs
             gamma=0.995,  # Slightly higher for long-term planning
             learning_rate=lr_schedule,
             clip_range=linear_schedule(
@@ -522,7 +523,7 @@ def main():
             gae_lambda=0.95,
             tensorboard_log=None,  # Disabled tensorboard logging
             policy_kwargs=dict(
-                features_extractor_class=feature_extractor_class,  # Selected feature extractor (FIXED)
+                features_extractor_class=feature_extractor_class,
                 features_extractor_kwargs=dict(features_dim=features_dim),
                 normalize_images=False,  # We handle normalization in the feature extractor
                 optimizer_class=torch.optim.Adam,
@@ -544,7 +545,7 @@ def main():
             print(
                 f"   ⚠️  WARNING: Using {vram_after:.1f}GB of {args.target_vram}GB target!"
             )
-            print(f"   💡 Consider using --model-size lightweight or --mixed-precision")
+            print(f"   💡 Consider using --model-size ultra-light or --mixed-precision")
 
     # Clear cache before training
     if device == "cuda":
@@ -562,14 +563,14 @@ def main():
 
     # Training with fighting game optimizations
     start_time = time.time()
-    print(f"🏋️ Starting FIGHTING GAME OPTIMIZED TRAINING with FIXED HIGH-PERFORMANCE B3")
-    print(
-        f"   🎯 Focus: Multi-component rewards with distance, combo, and defensive elements"
-    )
+    print(f"🏋️ Starting FIGHTING GAME OPTIMIZED TRAINING with {args.model_size.upper()}")
+    print(f"   🎯 Focus: Health-based rewards optimized for available game data")
     print(f"   📊 Hyperparameters optimized for adversarial environments")
     print(f"   🔥 Batch size: {batch_size} (fighting game optimized)")
-    print(f"   🏆 Pre-trained ImageNet features for superior pattern recognition")
-    print(f"   ✅ TENSOR DIMENSION MISMATCH FIXED!")
+    if args.model_size == "efficientnet-b2":
+        print(
+            f"   🏆 EfficientNet-B2 ImageNet features for superior pattern recognition"
+        )
 
     try:
         if args.mixed_precision:
@@ -577,8 +578,6 @@ def main():
             # Mixed precision training wrapper
             from torch.cuda.amp import autocast, GradScaler
 
-            # Note: This is a simplified approach. For full mixed precision in SB3,
-            # you'd need to modify the PPO training loop or use a custom implementation
             print(
                 f"   💡 Mixed precision flag set - implement custom training loop for full effect"
             )
@@ -629,27 +628,32 @@ def main():
 
     print("✅ FIGHTING GAME OPTIMIZED TRAINING COMPLETE!")
     print("🎯 Key improvements implemented:")
-    print("   • FIXED HIGH-PERFORMANCE EfficientNet-B3 from ImageNet")
-    print("   • Multi-Head Attention + CBAM attention mechanisms")
-    print("   • Reduced n_steps from 4096 to 512 for better policy updates")
+    if args.model_size == "efficientnet-b2":
+        print("   • EfficientNet-B2 from ImageNet (optimal balance)")
+        print("   • Multi-Head Attention + CBAM attention mechanisms")
+    print("   • Health-based reward system using available game data")
+    print(f"   • Optimized n_steps ({n_steps}) for better policy updates")
     print(f"   • Batch size set to {batch_size} for stable gradients")
     print("   • Tighter clip_range (0.12) for adversarial environments")
-    print("   • Increased learning rate to 3e-4")
+    print(f"   • Learning rate: {args.learning_rate}")
     print("   • Enhanced entropy coefficient for exploration")
-    print("   • Multi-component normalized reward system")
-    print("   • ImageNet normalization for optimal feature extraction")
-    print("   ✅ TENSOR DIMENSION MISMATCH RESOLVED!")
+    if args.model_size == "efficientnet-b2":
+        print("   • ImageNet normalization for optimal feature extraction")
 
     if args.mixed_precision:
         print("   ⚡ Mixed precision training reduces VRAM usage by ~40%")
 
     print(f"\n🎮 USAGE INSTRUCTIONS:")
-    print(f"   Run with: python train.py --batch-size 1024 --target-vram 20.0")
     print(
-        f"   For lower VRAM: python train.py --model-size lightweight --target-vram 12.0"
+        f"   Run with: python train.py --model-size efficientnet-b2 --target-vram 12.0"
     )
-    print(f"   Monitor training: FIXED EfficientNet-B3 should give MUCH better results")
-    print(f"   🎯 Expected: 60-80% win rates with ImageNet transfer learning! 🚀")
+    print(
+        f"   For lower VRAM: python train.py --model-size ultra-light --target-vram 8.0"
+    )
+    if args.model_size == "efficientnet-b2":
+        print(
+            f"   🎯 Expected: Better performance with ImageNet B2 transfer learning! 🚀"
+        )
 
 
 if __name__ == "__main__":

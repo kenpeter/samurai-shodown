@@ -7,8 +7,7 @@ python train.py --model-size ultra-light --target-vram 9.0 --batch-size 512 --n-
 
 
 
-python train.py --model-size ultra-light --target-vram 9.0 --batch-size 512 --n-steps 256 --total-timesteps 100000000 --learning-rate 4e-4 --render
-
+python train.py --model-size efficientnet-b2 --target-vram 9 --batch-size 256 --render
 
 
 ===

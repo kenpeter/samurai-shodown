@@ -467,334 +467,11 @@ class UltraLightCNNFeatureExtractor(BaseFeaturesExtractor):
         return x
 
 
-# Lightweight EfficientNet-B0 feature extractor for memory-constrained systems
-class LightweightEfficientNetFeatureExtractor(BaseFeaturesExtractor):
+# EfficientNet-B2 feature extractor - optimal balance for mid-range GPUs
+class EfficientNetB2FeatureExtractor(BaseFeaturesExtractor):
     """
-    Lightweight EfficientNet-B0 from ImageNet with attention mechanisms
-    Optimized for fighting games with lower memory usage
-    """
-
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
-        super().__init__(observation_space, features_dim)
-
-        n_input_channels = observation_space.shape[0]  # 27 channels (9 frames × 3 RGB)
-
-        # Load pre-trained EfficientNet-B0 (much smaller than B3)
-        print("🔄 Loading pre-trained EfficientNet-B0 from ImageNet (lightweight)...")
-
-        # Get the pre-trained model (B0 is much smaller)
-        efficientnet_b0 = torchvision.models.efficientnet_b0(weights="IMAGENET1K_V1")
-
-        # Extract features (everything except the classifier)
-        self.backbone_features = efficientnet_b0.features
-
-        # Get the original first conv layer
-        original_conv = self.backbone_features[0][0]
-
-        # Create new first conv layer to handle 27 input channels
-        self.backbone_features[0][0] = nn.Conv2d(
-            n_input_channels,  # 27 channels instead of 3
-            original_conv.out_channels,  # Keep same output channels (32 for B0)
-            kernel_size=original_conv.kernel_size,
-            stride=original_conv.stride,
-            padding=original_conv.padding,
-            bias=original_conv.bias,
-        )
-
-        # Initialize new conv weights using pretrained weights
-        with torch.no_grad():
-            # Average the pretrained weights across input channels and repeat
-            pretrained_weight = original_conv.weight
-            new_weight = pretrained_weight.mean(dim=1, keepdim=True).repeat(
-                1, n_input_channels, 1, 1
-            )
-            # Scale down to maintain similar activation magnitudes
-            new_weight = new_weight / (n_input_channels / 3.0)
-            self.backbone_features[0][0].weight.copy_(new_weight)
-
-        # Simplified attention (only at key stages to save memory)
-        self.attention_modules = nn.ModuleDict(
-            {
-                "stage_3": CBAM(40),  # After stage 3
-                "stage_6": CBAM(112),  # After stage 6
-            }
-        )
-
-        # Global pooling (EfficientNet-B0 outputs 1280 channels instead of 1536)
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.flatten = nn.Flatten()
-
-        # Simplified attention mechanism to save memory
-        self.simple_attention = nn.Sequential(
-            nn.Linear(1280, 320),
-            nn.ReLU(inplace=True),
-            nn.Linear(320, 1280),
-            nn.Sigmoid(),
-        )
-
-        # Final classification layers with aggressive compression
-        self.classifier = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(1280, 512),
-            nn.SiLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(512, features_dim),
-            nn.SiLU(inplace=True),
-        )
-
-        print(f"🧠 LIGHTWEIGHT EFFICIENTNET-B0 + ATTENTION:")
-        print(f"   📊 Input: {observation_space.shape}")
-        print(
-            f"   🎨 Input channels: {n_input_channels} (adapted from 3-channel ImageNet)"
-        )
-        print(f"   🏆 Pre-trained: ImageNet weights with transfer learning")
-        print(f"   🔍 Simplified CBAM attention to save memory")
-        print(f"   💾 Memory optimized: B0 instead of B3 (much smaller)")
-        print(f"   🎯 Output features: {features_dim}")
-        print(f"   🚀 Expected: Good performance with lower memory usage!")
-
-    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Normalize input to ImageNet standards
-        x = observations.float() / 255.0
-
-        # ImageNet normalization (adapted for our multi-channel input)
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype)
-        std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype)
-
-        # Reshape for normalization (apply to every 3 channels)
-        batch_size, channels, height, width = x.shape
-        x_reshaped = x.view(batch_size, -1, 3, height, width)  # [B, 9, 3, H, W]
-
-        # Normalize each RGB triplet
-        for i in range(3):
-            x_reshaped[:, :, i] = (x_reshaped[:, :, i] - mean[i]) / std[i]
-
-        x = x_reshaped.view(
-            batch_size, channels, height, width
-        )  # Back to [B, 27, H, W]
-
-        # Pass through EfficientNet backbone with limited attention
-        for i, layer in enumerate(self.backbone_features):
-            x = layer(x)
-
-            # Apply CBAM attention at limited stages to save memory
-            if i == 3 and x.shape[1] == 40:  # After stage 3
-                x = self.attention_modules["stage_3"](x)
-            elif i == 6 and x.shape[1] == 112:  # After stage 6
-                x = self.attention_modules["stage_6"](x)
-
-        # Global pooling and flatten
-        features = self.global_pool(x)
-        features = self.flatten(features)  # Shape: [batch_size, 1280]
-
-        # Simple attention instead of multi-head to save memory
-        attention_weights = self.simple_attention(features)
-        attended_features = features * attention_weights
-
-        # Final classification
-        output = self.classifier(attended_features)
-
-        return output
-
-
-# High-Performance EfficientNet-B3 feature extractor with maximum VRAM usage - FIXED VERSION
-class HighPerformanceEfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
-    """
-    High-Performance EfficientNet-B3 from ImageNet with maximum VRAM usage
-    Designed for high-end GPUs (16GB+ VRAM) with aggressive performance optimizations
-    FIXED: Tensor dimension mismatch in multi-scale pooling
-    """
-
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 1024):
-        super().__init__(observation_space, features_dim)
-
-        n_input_channels = observation_space.shape[0]  # 27 channels (9 frames × 3 RGB)
-
-        # Load pre-trained EfficientNet-B3 from torchvision
-        print(
-            "🔄 Loading pre-trained EfficientNet-B3 from ImageNet (HIGH PERFORMANCE MODE)..."
-        )
-
-        # Get the pre-trained model
-        efficientnet_b3 = torchvision.models.efficientnet_b3(weights="IMAGENET1K_V1")
-
-        # Extract features (everything except the classifier)
-        self.backbone_features = efficientnet_b3.features
-
-        # Get the original first conv layer
-        original_conv = self.backbone_features[0][0]
-
-        # Create new first conv layer to handle 27 input channels
-        self.backbone_features[0][0] = nn.Conv2d(
-            n_input_channels,  # 27 channels instead of 3
-            original_conv.out_channels,  # Keep same output channels (40)
-            kernel_size=original_conv.kernel_size,
-            stride=original_conv.stride,
-            padding=original_conv.padding,
-            bias=original_conv.bias,
-        )
-
-        # Initialize new conv weights using pretrained weights
-        with torch.no_grad():
-            # Average the pretrained weights across input channels and repeat
-            pretrained_weight = original_conv.weight
-            new_weight = pretrained_weight.mean(dim=1, keepdim=True).repeat(
-                1, n_input_channels, 1, 1
-            )
-            # Scale down to maintain similar activation magnitudes
-            new_weight = new_weight / (n_input_channels / 3.0)
-            self.backbone_features[0][0].weight.copy_(new_weight)
-
-        # ENHANCED ATTENTION: Add CBAM at ALL major stages for maximum pattern recognition
-        self.attention_modules = nn.ModuleDict(
-            {
-                "stage_1": CBAM(24, reduction=8),  # More aggressive attention
-                "stage_2": CBAM(32, reduction=8),
-                "stage_3": CBAM(48, reduction=8),
-                "stage_4": CBAM(96, reduction=8),
-                "stage_5": CBAM(136, reduction=8),
-                "stage_6": CBAM(232, reduction=8),
-                "stage_7": CBAM(384, reduction=8),
-            }
-        )
-
-        # Enhanced spatial attention for fighting game patterns
-        self.spatial_attention = nn.ModuleList(
-            [
-                SpatialAttention(kernel_size=7),
-                SpatialAttention(kernel_size=5),
-                SpatialAttention(kernel_size=3),
-            ]
-        )
-
-        # FIXED: Simplified pooling strategy to avoid dimension mismatch
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.flatten = nn.Flatten()
-
-        # Enhanced Multi-head attention with more heads and larger dimensions
-        self.attention_1 = MultiHeadAttention(1536, num_heads=16, dropout=0.1)
-        self.attention_2 = MultiHeadAttention(1536, num_heads=16, dropout=0.1)
-
-        # Layer normalization for attention stability
-        self.layer_norm_1 = nn.LayerNorm(1536)
-        self.layer_norm_2 = nn.LayerNorm(1536)
-
-        # FIXED: Feature processor with correct input dimension
-        self.feature_processor = nn.Sequential(
-            nn.Linear(1536, 2048),  # FIXED: Direct 1536 input, not 1536*7
-            nn.SiLU(inplace=True),
-            nn.Dropout(0.3),
-            nn.Linear(2048, 1536),
-            nn.SiLU(inplace=True),
-            nn.Dropout(0.2),
-            nn.Linear(1536, 1024),
-            nn.SiLU(inplace=True),
-            nn.Dropout(0.1),
-        )
-
-        # Final classification layers with enhanced capacity
-        self.classifier = nn.Sequential(
-            nn.Linear(1024, 512),
-            nn.SiLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(512, features_dim),
-            nn.SiLU(inplace=True),
-        )
-
-        print(f"🧠 HIGH-PERFORMANCE EFFICIENTNET-B3 + MAXIMUM ATTENTION (FIXED):")
-        print(f"   📊 Input: {observation_space.shape}")
-        print(
-            f"   🎨 Input channels: {n_input_channels} (adapted from 3-channel ImageNet)"
-        )
-        print(f"   🏆 Pre-trained: ImageNet weights with transfer learning")
-        print(f"   🔍 CBAM attention at ALL 7 stages with aggressive reduction")
-        print(
-            f"   🧩 Dual Multi-head attention (16 heads each) for complex relationships"
-        )
-        print(f"   🎯 Global pooling only (simplified for stability)")
-        print(
-            f"   💪 Enhanced feature processing: 1536 → 2048 → 1536 → 1024 → {features_dim}"
-        )
-        print(f"   🚀 Expected: MAXIMUM performance with high VRAM usage!")
-        print(f"   💾 Estimated VRAM: 16-24GB (designed for high-end GPUs)")
-        print(f"   ✅ FIXED: Tensor dimension mismatch resolved")
-
-    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Normalize input to ImageNet standards with enhanced preprocessing
-        x = observations.float() / 255.0
-
-        # ImageNet normalization with per-channel statistics
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype)
-        std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype)
-
-        # Reshape for normalization (apply to every 3 channels)
-        batch_size, channels, height, width = x.shape
-        x_reshaped = x.view(batch_size, -1, 3, height, width)  # [B, 9, 3, H, W]
-
-        # Normalize each RGB triplet
-        for i in range(3):
-            x_reshaped[:, :, i] = (x_reshaped[:, :, i] - mean[i]) / std[i]
-
-        x = x_reshaped.view(
-            batch_size, channels, height, width
-        )  # Back to [B, 27, H, W]
-
-        # Pass through EfficientNet backbone with MAXIMUM attention
-        for i, layer in enumerate(self.backbone_features):
-            x = layer(x)
-
-            # Apply CBAM attention at ALL major stages
-            if i == 1 and x.shape[1] == 24:  # Stage 1
-                x = self.attention_modules["stage_1"](x)
-            elif i == 2 and x.shape[1] == 32:  # Stage 2
-                x = self.attention_modules["stage_2"](x)
-            elif i == 3 and x.shape[1] == 48:  # Stage 3
-                x = self.attention_modules["stage_3"](x)
-                # Add spatial attention for fighting patterns
-                for spatial_att in self.spatial_attention:
-                    x = x * spatial_att(x)
-            elif i == 4 and x.shape[1] == 96:  # Stage 4
-                x = self.attention_modules["stage_4"](x)
-            elif i == 5 and x.shape[1] == 136:  # Stage 5
-                x = self.attention_modules["stage_5"](x)
-            elif i == 6 and x.shape[1] == 232:  # Stage 6
-                x = self.attention_modules["stage_6"](x)
-            elif i == 7 and x.shape[1] == 384:  # Stage 7
-                x = self.attention_modules["stage_7"](x)
-
-        # FIXED: Simple global pooling to get [batch_size, 1536]
-        global_features = self.global_pool(x)
-        global_features = self.flatten(global_features)  # [batch_size, 1536]
-
-        # Enhanced dual multi-head attention processing
-        # Reshape for attention: [batch_size, 1, 1536]
-        attention_input = global_features.unsqueeze(1)  # [batch_size, 1, 1536]
-
-        # First attention layer with residual connection
-        attended_1 = self.attention_1(attention_input)
-        attended_1 = self.layer_norm_1(attended_1 + attention_input)
-
-        # Second attention layer with residual connection
-        attended_2 = self.attention_2(attended_1)
-        attended_2 = self.layer_norm_2(attended_2 + attended_1)
-
-        # Flatten back: [batch_size, 1536]
-        final_features = attended_2.squeeze(1)  # [batch_size, 1536]
-
-        # Enhanced feature processing
-        processed_features = self.feature_processor(final_features)
-
-        # Final classification
-        output = self.classifier(processed_features)
-
-        return output
-
-
-# Pre-trained EfficientNet-B3 feature extractor with attention mechanisms
-class EfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
-    """
-    Pre-trained EfficientNet-B3 from ImageNet with Multi-Head Attention and CBAM
-    Optimized for fighting game pattern recognition with transfer learning
+    EfficientNet-B2 from ImageNet with attention mechanisms
+    Optimal balance of performance and memory usage for mid-range GPUs (10-14GB VRAM)
     """
 
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
@@ -802,14 +479,14 @@ class EfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
 
         n_input_channels = observation_space.shape[0]  # 27 channels (9 frames × 3 RGB)
 
-        # Load pre-trained EfficientNet-B3 from torchvision
-        print("🔄 Loading pre-trained EfficientNet-B3 from ImageNet...")
+        # Load pre-trained EfficientNet-B2 from torchvision
+        print("🔄 Loading pre-trained EfficientNet-B2 from ImageNet...")
 
-        # Get the pre-trained model
-        efficientnet_b3 = torchvision.models.efficientnet_b3(weights="IMAGENET1K_V1")
+        # Get the pre-trained model (B2 is optimal balance)
+        efficientnet_b2 = torchvision.models.efficientnet_b2(weights="IMAGENET1K_V1")
 
         # Extract features (everything except the classifier)
-        self.backbone_features = efficientnet_b3.features
+        self.backbone_features = efficientnet_b2.features
 
         # Get the original first conv layer
         original_conv = self.backbone_features[0][0]
@@ -817,7 +494,7 @@ class EfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
         # Create new first conv layer to handle 27 input channels
         self.backbone_features[0][0] = nn.Conv2d(
             n_input_channels,  # 27 channels instead of 3
-            original_conv.out_channels,  # Keep same output channels (40)
+            original_conv.out_channels,  # Keep same output channels (32 for B2)
             kernel_size=original_conv.kernel_size,
             stride=original_conv.stride,
             padding=original_conv.padding,
@@ -835,50 +512,53 @@ class EfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
             new_weight = new_weight / (n_input_channels / 3.0)
             self.backbone_features[0][0].weight.copy_(new_weight)
 
-        # Add CBAM attention after key feature extraction layers
+        # CBAM attention at key stages for optimal pattern recognition
         self.attention_modules = nn.ModuleDict(
             {
-                "stage_1": CBAM(24),  # After stage 1
-                "stage_3": CBAM(48),  # After stage 3
-                "stage_5": CBAM(136),  # After stage 5
-                "stage_7": CBAM(384),  # After final stage
+                "stage_2": CBAM(24, reduction=8),  # After stage 2
+                "stage_4": CBAM(48, reduction=8),  # After stage 4
+                "stage_6": CBAM(120, reduction=8),  # After stage 6
+                "stage_8": CBAM(352, reduction=8),  # After final stage
             }
         )
 
-        # Global pooling (EfficientNet-B3 outputs 1536 channels)
+        # Global pooling (EfficientNet-B2 outputs 1408 channels)
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.flatten = nn.Flatten()
 
         # Multi-head attention for feature refinement
-        self.attention = MultiHeadAttention(1536, num_heads=8)
+        self.attention = MultiHeadAttention(1408, num_heads=8, dropout=0.1)
 
-        # Final classification layers with dropout for regularization
+        # Layer normalization for attention stability
+        self.layer_norm = nn.LayerNorm(1408)
+
+        # Final classification layers with optimal capacity
         self.classifier = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(1536, 768),
+            nn.Linear(1408, 768),
             nn.SiLU(inplace=True),
             nn.Dropout(0.2),
             nn.Linear(768, features_dim),
             nn.SiLU(inplace=True),
         )
 
-        print(f"🧠 PRE-TRAINED EFFICIENTNET-B3 + ATTENTION:")
+        print(f"🧠 EFFICIENTNET-B2 + ATTENTION (OPTIMAL BALANCE):")
         print(f"   📊 Input: {observation_space.shape}")
         print(
             f"   🎨 Input channels: {n_input_channels} (adapted from 3-channel ImageNet)"
         )
         print(f"   🏆 Pre-trained: ImageNet weights with transfer learning")
-        print(f"   🔍 CBAM attention at key stages for pattern focus")
+        print(f"   🔍 CBAM attention at 4 key stages for pattern focus")
         print(f"   🧩 Multi-head attention (8 heads) for feature relationships")
+        print(f"   💾 Memory usage: ~10-14GB VRAM (optimal for mid-range GPUs)")
         print(f"   🎯 Output features: {features_dim}")
-        print(f"   🚀 Expected: Much better performance with ImageNet knowledge!")
+        print(f"   ⚖️ Perfect balance: Better than B0, more efficient than B3!")
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         # Normalize input to ImageNet standards
         x = observations.float() / 255.0
 
         # ImageNet normalization (adapted for our multi-channel input)
-        # Note: We apply the same normalization per channel
         mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype)
         std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype)
 
@@ -895,29 +575,28 @@ class EfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
         )  # Back to [B, 27, H, W]
 
         # Pass through EfficientNet backbone with attention
-        stage_outputs = []
-
         for i, layer in enumerate(self.backbone_features):
             x = layer(x)
 
             # Apply CBAM attention at key stages
-            if i == 1 and x.shape[1] == 24:  # After stage 1
-                x = self.attention_modules["stage_1"](x)
-            elif i == 3 and x.shape[1] == 48:  # After stage 3
-                x = self.attention_modules["stage_3"](x)
-            elif i == 5 and x.shape[1] == 136:  # After stage 5
-                x = self.attention_modules["stage_5"](x)
-            elif i == 7 and x.shape[1] == 384:  # After final stage
-                x = self.attention_modules["stage_7"](x)
+            if i == 2 and x.shape[1] == 24:  # After stage 2
+                x = self.attention_modules["stage_2"](x)
+            elif i == 4 and x.shape[1] == 48:  # After stage 4
+                x = self.attention_modules["stage_4"](x)
+            elif i == 6 and x.shape[1] == 120:  # After stage 6
+                x = self.attention_modules["stage_6"](x)
+            elif i == 8 and x.shape[1] == 352:  # After final stage
+                x = self.attention_modules["stage_8"](x)
 
         # Global pooling and flatten
         features = self.global_pool(x)
-        features = self.flatten(features)  # Shape: [batch_size, 1536]
+        features = self.flatten(features)  # Shape: [batch_size, 1408]
 
         # Multi-head attention (treat features as sequence of length 1)
-        features_reshaped = features.unsqueeze(1)  # Shape: [batch_size, 1, 1536]
+        features_reshaped = features.unsqueeze(1)  # Shape: [batch_size, 1, 1408]
         attended_features = self.attention(features_reshaped)
-        attended_features = attended_features.squeeze(1)  # Shape: [batch_size, 1536]
+        attended_features = self.layer_norm(attended_features + features_reshaped)
+        attended_features = attended_features.squeeze(1)  # Shape: [batch_size, 1408]
 
         # Final classification
         output = self.classifier(attended_features)
