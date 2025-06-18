@@ -139,7 +139,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         }
 
     def _calculate_reward(self, game_info, info):
-        """Multi-component reward system for fighting games"""
+        """Multi-component reward system for fighting games with normalization"""
         reward = 0.0
 
         player_health = game_info["player_health"]
@@ -150,23 +150,36 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.prev_player_health = player_health
             self.prev_enemy_health = enemy_health
 
-        # 1. Health difference rewards/penalties
+        # 1. Health difference rewards/penalties (NORMALIZED)
         health_diff = self.prev_player_health - player_health
         enemy_health_diff = self.prev_enemy_health - enemy_health
 
-        # Reward for damaging enemy
+        # Normalize health changes by max health (128)
+        # Reward for damaging enemy (0 to +1.0 range)
         if enemy_health_diff > 0:
-            reward += enemy_health_diff * 0.1
+            normalized_enemy_damage = enemy_health_diff / self.full_hp
+            reward += normalized_enemy_damage * 2.0  # Scale to make it significant
 
-        # Penalty for taking damage
+        # Penalty for taking damage (0 to -1.0 range)
         if health_diff > 0:
-            reward -= health_diff * 0.05
+            normalized_player_damage = health_diff / self.full_hp
+            reward -= normalized_player_damage * 1.0  # Penalty is less than reward
 
-        # 2. Health advantage bonus
-        health_advantage = player_health - enemy_health
-        reward += health_advantage * 0.001
+        # 2. Health advantage bonus (NORMALIZED)
+        # Normalize health advantage to [-1, +1] range
+        health_advantage = (player_health - enemy_health) / self.full_hp
+        reward += health_advantage * 0.1  # Small continuous advantage bonus
 
-        # 3. Round completion rewards (if round info available)
+        # 3. Health percentage bonus (NORMALIZED)
+        # Bonus for maintaining high health
+        player_health_ratio = player_health / self.full_hp
+        enemy_health_ratio = enemy_health / self.full_hp
+
+        # Reward for having high health, penalty for low health
+        reward += (player_health_ratio - 0.5) * 0.05  # Range: -0.025 to +0.025
+        reward -= (enemy_health_ratio - 0.5) * 0.05  # Penalty if enemy has high health
+
+        # 4. Round completion rewards (NORMALIZED)
         current_round = game_info.get("current_round", 1)
 
         # Simple round end detection based on very low health
@@ -174,17 +187,32 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         if round_over:
             if player_health > enemy_health:
-                reward += 10.0  # Win round
+                # Win bonus: larger bonus for decisive wins
+                health_ratio_advantage = (player_health - enemy_health) / self.full_hp
+                win_bonus = 5.0 + (health_ratio_advantage * 2.0)  # 5.0 to 7.0 range
+                reward += win_bonus
+
                 self.current_stats["wins"] += 1
                 self.current_stats["current_win_streak"] += 1
                 self.current_stats["best_win_streak"] = max(
                     self.current_stats["best_win_streak"],
                     self.current_stats["current_win_streak"],
                 )
-            else:
-                reward -= 5.0  # Lose round
+            elif enemy_health > player_health:
+                # Loss penalty: smaller penalty for close losses
+                health_ratio_disadvantage = (
+                    enemy_health - player_health
+                ) / self.full_hp
+                loss_penalty = -2.0 - (
+                    health_ratio_disadvantage * 1.0
+                )  # -2.0 to -3.0 range
+                reward += loss_penalty
+
                 self.current_stats["losses"] += 1
                 self.current_stats["current_win_streak"] = 0
+            else:
+                # Draw - small penalty to encourage decisive play
+                reward -= 1.0
 
             self.current_stats["total_rounds"] += 1
             if self.current_stats["total_rounds"] > 0:
@@ -192,12 +220,23 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     self.current_stats["wins"] / self.current_stats["total_rounds"]
                 )
 
-        # 4. Small time penalty to encourage action
-        reward -= 0.001
+        # 5. Time penalty (NORMALIZED)
+        # Small time penalty to encourage action, normalized by episode length
+        time_penalty = -0.001  # Very small penalty per step
+        reward += time_penalty
+
+        # 6. Survival bonus (NORMALIZED)
+        # Small bonus for staying alive, scaled by remaining health
+        if player_health > 0:
+            survival_bonus = (player_health / self.full_hp) * 0.002  # 0 to 0.002 range
+            reward += survival_bonus
 
         # Update previous values
         self.prev_player_health = player_health
         self.prev_enemy_health = enemy_health
+
+        # Clip final reward to reasonable range to prevent extreme values
+        reward = max(-10.0, min(10.0, reward))
 
         return reward
 
@@ -400,11 +439,78 @@ class MultiHeadAttention(nn.Module):
         return output
 
 
-# EfficientNet-B2 feature extractor - optimal balance for mid-range GPUs
-class EfficientNetB2FeatureExtractor(BaseFeaturesExtractor):
+# Ultra-lightweight CNN for memory-constrained systems
+class UltraLightCNNFeatureExtractor(BaseFeaturesExtractor):
     """
-    EfficientNet-B2 from ImageNet with attention mechanisms
-    Optimal balance of performance and memory usage for mid-range GPUs (10-14GB VRAM)
+    Ultra-lightweight CNN feature extractor for 11GB GPUs
+    No pre-trained weights, minimal memory usage
+    """
+
+    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
+        super().__init__(observation_space, features_dim)
+
+        n_input_channels = observation_space.shape[0]  # 27 channels
+
+        # Ultra-lightweight network
+        self.features = nn.Sequential(
+            # Stage 1: Initial compression
+            nn.Conv2d(n_input_channels, 32, kernel_size=5, stride=2, padding=2),
+            nn.BatchNorm2d(32),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Stage 2: Feature extraction
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Stage 3: Pattern recognition
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+            # Stage 4: High-level features
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.AdaptiveAvgPool2d((4, 4)),
+        )
+
+        # Classifier
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Dropout(0.2),
+            nn.Linear(256 * 4 * 4, 512),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(512, features_dim),
+            nn.ReLU(inplace=True),
+        )
+
+        print(f"🧠 ULTRA-LIGHT CNN:")
+        print(f"   📊 Input: {observation_space.shape}")
+        print(f"   💾 Memory: Minimal (~1GB)")
+        print(f"   🎨 Channels: {n_input_channels} → 32 → 64 → 128 → 256")
+        print(f"   🎯 Output: {features_dim}")
+        print(f"   ⚡ Ultra-lightweight for 11GB GPUs")
+
+    def forward(self, observations: torch.Tensor) -> torch.Tensor:
+        # Simple normalization
+        x = observations.float() / 255.0
+
+        # Feature extraction
+        x = self.features(x)
+
+        # Classification
+        x = self.classifier(x)
+
+        return x
+
+
+# EfficientNet-B3 feature extractor - optimized for 11GB GPUs
+class EfficientNetB3FeatureExtractor(BaseFeaturesExtractor):
+    """
+    EfficientNet-B3 from ImageNet with attention mechanisms
+    OPTIMIZED for 11GB GPUs with memory-efficient design
     """
 
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
@@ -412,14 +518,16 @@ class EfficientNetB2FeatureExtractor(BaseFeaturesExtractor):
 
         n_input_channels = observation_space.shape[0]  # 27 channels (9 frames × 3 RGB)
 
-        # Load pre-trained EfficientNet-B2 from torchvision
-        print("🔄 Loading pre-trained EfficientNet-B2 from ImageNet...")
+        # Load pre-trained EfficientNet-B3 from torchvision
+        print(
+            "🔄 Loading pre-trained EfficientNet-B3 from ImageNet (11GB GPU OPTIMIZED)..."
+        )
 
-        # Get the pre-trained model (B2 is optimal balance)
-        efficientnet_b2 = torchvision.models.efficientnet_b2(weights="IMAGENET1K_V1")
+        # Get the pre-trained model
+        efficientnet_b3 = torchvision.models.efficientnet_b3(weights="IMAGENET1K_V1")
 
         # Extract features (everything except the classifier)
-        self.backbone_features = efficientnet_b2.features
+        self.backbone_features = efficientnet_b3.features
 
         # Get the original first conv layer
         original_conv = self.backbone_features[0][0]
@@ -427,7 +535,7 @@ class EfficientNetB2FeatureExtractor(BaseFeaturesExtractor):
         # Create new first conv layer to handle 27 input channels
         self.backbone_features[0][0] = nn.Conv2d(
             n_input_channels,  # 27 channels instead of 3
-            original_conv.out_channels,  # Keep same output channels (32 for B2)
+            original_conv.out_channels,  # Keep same output channels (40 for B3)
             kernel_size=original_conv.kernel_size,
             stride=original_conv.stride,
             padding=original_conv.padding,
@@ -445,47 +553,48 @@ class EfficientNetB2FeatureExtractor(BaseFeaturesExtractor):
             new_weight = new_weight / (n_input_channels / 3.0)
             self.backbone_features[0][0].weight.copy_(new_weight)
 
-        # CBAM attention at key stages for optimal pattern recognition
+        # REDUCED ATTENTION: Only at 2 key stages to save memory
         self.attention_modules = nn.ModuleDict(
             {
-                "stage_2": CBAM(24, reduction=8),  # After stage 2
-                "stage_4": CBAM(48, reduction=8),  # After stage 4
-                "stage_6": CBAM(120, reduction=8),  # After stage 6
-                "stage_8": CBAM(352, reduction=8),  # After final stage
+                "stage_4": CBAM(48, reduction=16),  # Reduced from 8 to 16
+                "stage_8": CBAM(384, reduction=16),  # Reduced from 8 to 16
             }
         )
 
-        # Global pooling (EfficientNet-B2 outputs 1408 channels)
+        # Global pooling (EfficientNet-B3 outputs 1536 channels)
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.flatten = nn.Flatten()
 
-        # Multi-head attention for feature refinement
-        self.attention = MultiHeadAttention(1408, num_heads=8, dropout=0.1)
+        # SIMPLIFIED attention to save memory - no multi-head
+        self.simple_attention = nn.Sequential(
+            nn.Linear(1536, 384),  # Reduced from 1536 to 384
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(384, 1536),
+            nn.Sigmoid(),
+        )
 
-        # Layer normalization for attention stability
-        self.layer_norm = nn.LayerNorm(1408)
-
-        # Final classification layers with optimal capacity
+        # COMPRESSED classification layers to save memory
         self.classifier = nn.Sequential(
             nn.Dropout(0.3),
-            nn.Linear(1408, 768),
+            nn.Linear(1536, 512),  # Reduced from 768 to 512
             nn.SiLU(inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(768, features_dim),
+            nn.Linear(512, features_dim),
             nn.SiLU(inplace=True),
         )
 
-        print(f"🧠 EFFICIENTNET-B2 + ATTENTION (OPTIMAL BALANCE):")
+        print(f"🧠 EFFICIENTNET-B3 + MEMORY-OPTIMIZED ATTENTION:")
         print(f"   📊 Input: {observation_space.shape}")
         print(
             f"   🎨 Input channels: {n_input_channels} (adapted from 3-channel ImageNet)"
         )
         print(f"   🏆 Pre-trained: ImageNet weights with transfer learning")
-        print(f"   🔍 CBAM attention at 4 key stages for pattern focus")
-        print(f"   🧩 Multi-head attention (8 heads) for feature relationships")
-        print(f"   💾 Memory usage: ~10-14GB VRAM (optimal for mid-range GPUs)")
+        print(f"   🔍 CBAM attention at 2 key stages (memory optimized)")
+        print(f"   🧩 Simple attention instead of multi-head (saves memory)")
+        print(f"   💾 Memory usage: OPTIMIZED for 11GB GPUs")
         print(f"   🎯 Output features: {features_dim}")
-        print(f"   ⚖️ Perfect balance: Better than B0, more efficient than B3!")
+        print(f"   ⚖️ Balanced: B3 performance with 11GB memory efficiency!")
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
         # Normalize input to ImageNet standards
@@ -507,29 +616,23 @@ class EfficientNetB2FeatureExtractor(BaseFeaturesExtractor):
             batch_size, channels, height, width
         )  # Back to [B, 27, H, W]
 
-        # Pass through EfficientNet backbone with attention
+        # Pass through EfficientNet backbone with REDUCED attention
         for i, layer in enumerate(self.backbone_features):
             x = layer(x)
 
-            # Apply CBAM attention at key stages
-            if i == 2 and x.shape[1] == 24:  # After stage 2
-                x = self.attention_modules["stage_2"](x)
-            elif i == 4 and x.shape[1] == 48:  # After stage 4
+            # Apply CBAM attention at ONLY 2 key stages (memory optimized)
+            if i == 4 and x.shape[1] == 48:  # After stage 4
                 x = self.attention_modules["stage_4"](x)
-            elif i == 6 and x.shape[1] == 120:  # After stage 6
-                x = self.attention_modules["stage_6"](x)
-            elif i == 8 and x.shape[1] == 352:  # After final stage
+            elif i == 8 and x.shape[1] == 384:  # After final stage
                 x = self.attention_modules["stage_8"](x)
 
         # Global pooling and flatten
         features = self.global_pool(x)
-        features = self.flatten(features)  # Shape: [batch_size, 1408]
+        features = self.flatten(features)  # Shape: [batch_size, 1536]
 
-        # Multi-head attention (treat features as sequence of length 1)
-        features_reshaped = features.unsqueeze(1)  # Shape: [batch_size, 1, 1408]
-        attended_features = self.attention(features_reshaped)
-        attended_features = self.layer_norm(attended_features + features_reshaped)
-        attended_features = attended_features.squeeze(1)  # Shape: [batch_size, 1408]
+        # Simple attention instead of multi-head to save memory
+        attention_weights = self.simple_attention(features)
+        attended_features = features * attention_weights
 
         # Final classification
         output = self.classifier(attended_features)
