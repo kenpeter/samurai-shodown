@@ -8,7 +8,10 @@ python train.py --resume trained_models_fighting_optimized/ppo_fighting_optimize
 
 
 
-python train.py --batch-size 1536 --n-steps 4608 --target-vram 12 --render --total-timesteps 100000000 
+
+
+python train.py --batch-size 3072 --n-steps 3072  --render --total-timesteps 100000000 
+
 
 
 ~/anaconda3/envs/samurai-showdown/lib/python3.10/site-packages/retro/data/stable/SamuraiShodown-Genesis

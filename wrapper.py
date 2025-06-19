@@ -6,8 +6,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import torchvision
-import torchvision.transforms as transforms
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from typing import Dict, Tuple, Optional
 import math
@@ -16,13 +14,15 @@ import math
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
     """
     PRIME-optimized wrapper for Samurai Showdown fighting game with proper reward modeling
+    UPDATED: 4 frames for memory efficiency with large batch training
 
     Features:
-    - Frame stacking (9 frames) with RGB channels (27 total channels)
+    - Frame stacking (4 frames) with RGB channels (12 total channels)
     - Dense process rewards compatible with PRIME methodology
     - Proper action tracking for credit assignment
     - Performance tracking with detailed statistics
     - Scaled reward system for gradient stability
+    - Optimized for large batch sizes (2048+) and long trajectories (3000+)
     """
 
     def __init__(
@@ -31,7 +31,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         reset_round=True,
         rendering=False,
         max_episode_steps=15000,
-        frame_stack=9,
+        frame_stack=4,  # 4 frames for memory efficiency
         frame_skip=4,
         target_size=(180, 126),
     ):
@@ -40,7 +40,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.reset_round = reset_round
         self.rendering = rendering
         self.max_episode_steps = max_episode_steps
-        self.frame_stack = frame_stack
+        self.frame_stack = frame_stack  # 4 frames
         self.frame_skip = frame_skip
         self.target_size = target_size
 
@@ -89,7 +89,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.outcome_weight = 0.3  # 30% outcome, 70% process (PRIME recommendation)
         self.process_weight = 0.7
 
-        # Frame buffer for stacking
+        # Frame buffer for stacking - 4 FRAMES
         self.frame_buffer = deque(maxlen=self.frame_stack)
 
         # Initialize frame buffer with zeros
@@ -99,19 +99,19 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         for _ in range(self.frame_stack):
             self.frame_buffer.append(dummy_frame)
 
-        # Update observation space for stacked RGB frames
+        # Update observation space for stacked RGB frames - 12 CHANNELS
         self.observation_space = spaces.Box(
             low=0,
             high=255,
             shape=(
-                self.frame_stack * 3,
+                self.frame_stack * 3,  # 4 * 3 = 12 channels
                 self.target_size[0],
                 self.target_size[1],
             ),
             dtype=np.uint8,
         )
 
-        print(f"🎮 PRIME-OPTIMIZED SAMURAI SHOWDOWN WRAPPER INITIALIZED:")
+        print(f"🎮 PRIME-OPTIMIZED SAMURAI SHOWDOWN WRAPPER (SIMPLE CNN):")
         print(f"   📊 Observation space: {self.observation_space.shape}")
         print(
             f"   🎨 Frame stacking: {self.frame_stack} frames × 3 RGB = {self.frame_stack * 3} channels"
@@ -123,6 +123,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(
             f"   ⚖️ Reward weighting: {self.process_weight:.1%} process + {self.outcome_weight:.1%} outcome"
         )
+        print(f"   💾 Memory optimized for LARGE batch training (2048+)")
+        print(f"   🚀 Optimized for Simple CNN + PRIME methodology")
 
     def _preprocess_frame(self, frame):
         """Preprocess frame: resize and maintain RGB channels"""
@@ -135,10 +137,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return frame.astype(np.uint8)
 
     def _get_stacked_observation(self):
-        """Create stacked observation from frame buffer"""
-        stacked = np.concatenate(list(self.frame_buffer), axis=2)  # (H, W, 27)
-        stacked = np.transpose(stacked, (2, 0, 1))  # (27, H, W)
-        stacked = np.transpose(stacked, (0, 2, 1))  # (27, W, H)
+        """Create stacked observation from frame buffer - 12 CHANNELS"""
+        stacked = np.concatenate(list(self.frame_buffer), axis=2)  # (H, W, 12)
+        stacked = np.transpose(stacked, (2, 0, 1))  # (12, H, W)
+        stacked = np.transpose(stacked, (0, 2, 1))  # (12, W, H)
         return stacked
 
     def _extract_game_state(self, info):
@@ -159,6 +161,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
     def _calculate_process_reward(self, game_info, action, info):
         """
         PRIME-style dense process reward calculation
+        OPTIMIZED: For large batch training with simple CNN
         Returns step-by-step dense rewards for better credit assignment
         """
         reward = 0.0
@@ -180,13 +183,17 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Scale by reward_scale for better gradients
         if enemy_health_diff > 0:
             normalized_damage = enemy_health_diff / self.full_hp
-            damage_reward = normalized_damage * 3.0 * self.reward_scale
+            damage_reward = (
+                normalized_damage * 3.5 * self.reward_scale
+            )  # Slightly increased for simple CNN
             reward += damage_reward
 
-            # Combo tracking
-            if self.step_count - self.last_damage_step <= 5:  # Within combo window
+            # Combo tracking - optimized for 4-frame window
+            if self.step_count - self.last_damage_step <= 4:
                 self.combo_length += 1
-                combo_bonus = min(self.combo_length * 0.1, 1.0) * self.reward_scale
+                combo_bonus = (
+                    min(self.combo_length * 0.15, 1.5) * self.reward_scale
+                )  # Enhanced for simple CNN
                 reward += combo_bonus
             else:
                 self.combo_length = 1
@@ -200,19 +207,17 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # 2. Health advantage (scaled)
         health_advantage = (player_health - enemy_health) / self.full_hp
-        advantage_reward = health_advantage * 0.5 * self.reward_scale
+        advantage_reward = (
+            health_advantage * 0.6 * self.reward_scale
+        )  # Slightly increased
         reward += advantage_reward
 
-        # 3. Action diversity reward (prevent button mashing)
-        # Handle gymnasium + stable-retro action format
-        # Actions in retro are typically arrays representing controller buttons
+        # 3. Action diversity reward (prevent button mashing) - enhanced for large batch
         if isinstance(action, np.ndarray):
-            # Convert multi-dimensional retro actions to a comparable format
-            # For retro games, action is typically a 1D array of button states
             if action.ndim == 1:
-                current_action = tuple(action)  # Convert to tuple for comparison
+                current_action = tuple(action)
             else:
-                current_action = tuple(action.flatten())  # Flatten if multi-dimensional
+                current_action = tuple(action.flatten())
         else:
             current_action = action
 
@@ -220,50 +225,55 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         if prev_action is not None:
             try:
-                # Compare action tuples (works for retro controller inputs)
                 if current_action == prev_action:
                     self.consecutive_same_action += 1
                     if self.consecutive_same_action > 3:
-                        diversity_penalty = -0.1 * self.reward_scale
+                        diversity_penalty = (
+                            -0.12 * self.reward_scale
+                        )  # Slightly increased penalty
                         reward += diversity_penalty
                 else:
                     self.consecutive_same_action = 0
-                    diversity_bonus = 0.05 * self.reward_scale
+                    diversity_bonus = (
+                        0.06 * self.reward_scale
+                    )  # Slightly increased bonus
                     reward += diversity_bonus
-            except (ValueError, TypeError) as e:
-                # If comparison fails, assume actions are different (safe fallback)
+            except (ValueError, TypeError):
                 self.consecutive_same_action = 0
-                diversity_bonus = 0.05 * self.reward_scale
+                diversity_bonus = 0.06 * self.reward_scale
                 reward += diversity_bonus
 
-        # 4. Combat engagement reward
+        # 4. Combat engagement reward - enhanced for simple CNN
         if enemy_health_diff > 0 or health_diff > 0:
-            engagement_bonus = 0.1 * self.reward_scale
+            engagement_bonus = 0.15 * self.reward_scale  # Increased for simple CNN
             reward += engagement_bonus
 
         # 5. Health preservation bonus
         player_health_ratio = player_health / self.full_hp
         if player_health_ratio > 0.8:
-            preservation_bonus = 0.1 * self.reward_scale
+            preservation_bonus = 0.12 * self.reward_scale  # Slightly increased
             reward += preservation_bonus
         elif player_health_ratio < 0.2:
-            low_health_penalty = -0.2 * self.reward_scale
+            low_health_penalty = -0.25 * self.reward_scale  # Slightly increased penalty
             reward += low_health_penalty
 
         # 6. Small time penalty (scaled)
-        time_penalty = -0.01 * self.reward_scale
+        time_penalty = (
+            -0.008 * self.reward_scale
+        )  # Slightly reduced for longer trajectories
         reward += time_penalty
 
         # Update tracking
         self.prev_player_health = player_health
         self.prev_enemy_health = enemy_health
-        self.prev_action = current_action  # Store scalar action
+        self.prev_action = current_action
 
         return reward
 
     def _calculate_outcome_reward(self, game_info, info):
         """
         Calculate sparse outcome reward for round completion
+        OPTIMIZED: For large batch training
         """
         player_health = game_info["player_health"]
         enemy_health = game_info["opponent_health"]
@@ -274,8 +284,12 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         if round_over:
             if player_health > enemy_health:
                 # Win with health-based scaling
-                health_bonus = (player_health / self.full_hp) * 5.0
-                win_reward = (15.0 + health_bonus) * self.reward_scale
+                health_bonus = (
+                    player_health / self.full_hp
+                ) * 6.0  # Slightly increased
+                win_reward = (
+                    18.0 + health_bonus
+                ) * self.reward_scale  # Increased for simple CNN
 
                 # Update stats
                 self.current_stats["wins"] += 1
@@ -289,7 +303,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             elif enemy_health > player_health:
                 # Loss penalty with scaling
                 health_disadvantage = (enemy_health - player_health) / self.full_hp
-                loss_penalty = -(8.0 + health_disadvantage * 3.0) * self.reward_scale
+                loss_penalty = (
+                    -(10.0 + health_disadvantage * 3.5) * self.reward_scale
+                )  # Slightly increased
 
                 # Update stats
                 self.current_stats["losses"] += 1
@@ -349,7 +365,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.action_history.clear()
         self.current_stats["current_episode_reward"] = 0.0
 
-        # Reset frame buffer
+        # Reset frame buffer - 4 FRAMES
         processed_frame = self._preprocess_frame(obs)
         self.frame_buffer.clear()
         for _ in range(self.frame_stack):
@@ -377,8 +393,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # Track action (gymnasium + stable-retro format)
         if isinstance(action, np.ndarray):
-            # For retro games, action is typically a 1D array of button states
-            action_scalar = tuple(action.flatten())  # Convert to tuple for storage
+            action_scalar = tuple(action.flatten())
         else:
             action_scalar = action
 
@@ -444,217 +459,75 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return self.env.close()
 
 
-# CBAM (Convolutional Block Attention Module) - Optimized
-class ChannelAttention(nn.Module):
-    def __init__(self, in_channels, reduction=16):
-        super(ChannelAttention, self).__init__()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.max_pool = nn.AdaptiveMaxPool2d(1)
-
-        self.fc = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels // reduction, 1, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(in_channels // reduction, in_channels, 1, bias=False),
-        )
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = self.fc(self.avg_pool(x))
-        max_out = self.fc(self.max_pool(x))
-        out = avg_out + max_out
-        return self.sigmoid(out)
-
-
-class SpatialAttention(nn.Module):
-    def __init__(self, kernel_size=7):
-        super(SpatialAttention, self).__init__()
-        self.conv1 = nn.Conv2d(2, 1, kernel_size, padding=kernel_size // 2, bias=False)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x):
-        avg_out = torch.mean(x, dim=1, keepdim=True)
-        max_out, _ = torch.max(x, dim=1, keepdim=True)
-        x = torch.cat([avg_out, max_out], dim=1)
-        x = self.conv1(x)
-        return self.sigmoid(x)
-
-
-class CBAM(nn.Module):
-    def __init__(self, in_channels, reduction=16, kernel_size=7):
-        super(CBAM, self).__init__()
-        self.channel_attention = ChannelAttention(in_channels, reduction)
-        self.spatial_attention = SpatialAttention(kernel_size)
-
-    def forward(self, x):
-        x = x * self.channel_attention(x)
-        x = x * self.spatial_attention(x)
-        return x
-
-
-# PRIME-compatible Multi-Head Attention
-class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model, num_heads=8, dropout=0.1):
-        super(MultiHeadAttention, self).__init__()
-        self.d_model = d_model
-        self.num_heads = num_heads
-        self.d_k = d_model // num_heads
-
-        self.w_q = nn.Linear(d_model, d_model)
-        self.w_k = nn.Linear(d_model, d_model)
-        self.w_v = nn.Linear(d_model, d_model)
-        self.w_o = nn.Linear(d_model, d_model)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x):
-        batch_size, seq_len, d_model = x.size()
-
-        Q = (
-            self.w_q(x)
-            .view(batch_size, seq_len, self.num_heads, self.d_k)
-            .transpose(1, 2)
-        )
-        K = (
-            self.w_k(x)
-            .view(batch_size, seq_len, self.num_heads, self.d_k)
-            .transpose(1, 2)
-        )
-        V = (
-            self.w_v(x)
-            .view(batch_size, seq_len, self.num_heads, self.d_k)
-            .transpose(1, 2)
-        )
-
-        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
-        attention_weights = F.softmax(scores, dim=-1)
-        attention_weights = self.dropout(attention_weights)
-
-        context = torch.matmul(attention_weights, V)
-        context = (
-            context.transpose(1, 2).contiguous().view(batch_size, seq_len, d_model)
-        )
-        output = self.w_o(context)
-        return output
-
-
-# PRIME-Optimized EfficientNet-B3 Feature Extractor
-class PRIMEOptimizedEfficientNetB3(BaseFeaturesExtractor):
+# Simple CNN Feature Extractor for PRIME
+class SimplePRIMECNN(BaseFeaturesExtractor):
     """
-    PRIME-optimized EfficientNet-B3 feature extractor
-    Designed for dense reward processing and stable gradients
+    Simple CNN optimized for PRIME + Large Batch + Long Trajectories
+    Memory efficient and fast - perfect for fighting games
     """
 
     def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
         super().__init__(observation_space, features_dim)
 
-        n_input_channels = observation_space.shape[0]  # 27 channels
+        n_input_channels = observation_space.shape[0]  # 12 channels for 4-frame
 
-        print("🔄 Loading PRIME-optimized EfficientNet-B3 from ImageNet...")
+        print(f"🚀 Creating Simple PRIME CNN for LARGE BATCH training...")
 
-        # Load pre-trained EfficientNet-B3
-        efficientnet_b3 = torchvision.models.efficientnet_b3(weights="IMAGENET1K_V1")
-        self.backbone_features = efficientnet_b3.features
-
-        # Adapt first layer for 27 channels
-        original_conv = self.backbone_features[0][0]
-        self.backbone_features[0][0] = nn.Conv2d(
-            n_input_channels,
-            original_conv.out_channels,
-            kernel_size=original_conv.kernel_size,
-            stride=original_conv.stride,
-            padding=original_conv.padding,
-            bias=original_conv.bias,
+        # Simple but effective CNN architecture
+        self.cnn = nn.Sequential(
+            # First block - capture basic features
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=2),
+            nn.ReLU(inplace=True),
+            # Second block - spatial patterns
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            # Third block - higher level features
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(inplace=True),
+            # Fourth block - fighting game specific
+            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(inplace=True),
+            # Global pooling
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
         )
 
-        # Initialize with averaged pretrained weights
+        # Calculate CNN output size
         with torch.no_grad():
-            pretrained_weight = original_conv.weight
-            new_weight = pretrained_weight.mean(dim=1, keepdim=True).repeat(
-                1, n_input_channels, 1, 1
-            )
-            new_weight = new_weight / (n_input_channels / 3.0)
-            self.backbone_features[0][0].weight.copy_(new_weight)
+            sample = torch.zeros(1, n_input_channels, 126, 180)
+            cnn_output_size = self.cnn(sample).shape[1]
 
-        # Strategic CBAM placement for fighting games
-        self.attention_modules = nn.ModuleDict(
-            {
-                "stage_4": CBAM(48, reduction=12),  # Mid-level features
-                "stage_8": CBAM(384, reduction=12),  # High-level features
-            }
-        )
-
-        # Global feature processing
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.flatten = nn.Flatten()
-
-        # PRIME-compatible attention processing
-        self.feature_attention = nn.Sequential(
-            nn.Linear(1536, 384),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(384, 1536),
-            nn.Sigmoid(),
-        )
-
-        # Gradient-friendly classifier
+        # Simple classifier
         self.classifier = nn.Sequential(
-            nn.Dropout(0.2),
-            nn.Linear(1536, 768),
-            nn.ReLU(inplace=True),  # ReLU for stable gradients
+            nn.Linear(cnn_output_size, 512),
+            nn.ReLU(inplace=True),
             nn.Dropout(0.1),
-            nn.Linear(768, features_dim),
+            nn.Linear(512, features_dim),
             nn.ReLU(inplace=True),
         )
 
-        print(f"🧠 PRIME-OPTIMIZED EFFICIENTNET-B3:")
+        print(f"🧠 SIMPLE PRIME CNN:")
         print(f"   📊 Input: {observation_space.shape}")
-        print(f"   🎨 Input channels: {n_input_channels} (adapted from ImageNet)")
-        print(f"   🏆 Pre-trained: ImageNet with fighting game optimization")
-        print(f"   🔍 Strategic CBAM at key stages")
-        print(f"   💾 Memory optimized for 11GB GPU")
-        print(f"   🎯 Output features: {features_dim}")
-        print(f"   🚀 PRIME-compatible with stable gradients!")
+        print(f"   🎨 Input channels: {n_input_channels} (4-frame)")
+        print(f"   🏗️ CNN output: {cnn_output_size}")
+        print(f"   🎯 Final features: {features_dim}")
+        print(f"   💾 Memory efficient for LARGE batches")
+        print(f"   🚀 Perfect for batch_size=2048+ and n_steps=3000+")
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Normalize with gradient-friendly scaling
+        # Simple normalization - much faster
         x = observations.float() / 255.0
 
-        # ImageNet normalization
-        mean = torch.tensor([0.485, 0.456, 0.406], device=x.device, dtype=x.dtype)
-        std = torch.tensor([0.229, 0.224, 0.225], device=x.device, dtype=x.dtype)
+        # CNN feature extraction
+        features = self.cnn(x)
 
-        # Apply normalization per RGB triplet
-        batch_size, channels, height, width = x.shape
-        x_reshaped = x.view(batch_size, -1, 3, height, width)
+        # Final classification
+        output = self.classifier(features)
 
-        for i in range(3):
-            x_reshaped[:, :, i] = (x_reshaped[:, :, i] - mean[i]) / std[i]
-
-        x = x_reshaped.view(batch_size, channels, height, width)
-
-        # Forward through backbone with strategic attention
-        for i, layer in enumerate(self.backbone_features):
-            x = layer(x)
-
-            # Apply attention at key stages
-            if i == 4 and x.shape[1] == 48:
-                x = self.attention_modules["stage_4"](x)
-            elif i == 8 and x.shape[1] == 384:
-                x = self.attention_modules["stage_8"](x)
-
-        # Global pooling and feature processing
-        features = self.global_pool(x)
-        features = self.flatten(features)
-
-        # Apply attention weighting
-        attention_weights = self.feature_attention(features)
-        attended_features = features * attention_weights
-
-        # Final classification with stable gradients
-        output = self.classifier(attended_features)
         return output
 
 
-# Optional: Utility function to create the wrapped environment
+# Utility function to create the wrapped environment
 def make_samurai_env(
     game="SamuraiShodown-Genesis",
     state=None,
@@ -665,6 +538,7 @@ def make_samurai_env(
 ):
     """
     Utility function to create a PRIME-optimized Samurai Showdown environment
+    UPDATED: Uses 4 frames and optimized for large batch training
     """
     import retro
 
@@ -675,6 +549,9 @@ def make_samurai_env(
         obs_type=retro.Observations.IMAGE,
         render_mode="human" if rendering else None,
     )
+
+    # Force 4-frame setup for memory efficiency
+    wrapper_kwargs.setdefault("frame_stack", 4)
 
     env = SamuraiShowdownCustomWrapper(
         env,
@@ -688,8 +565,8 @@ def make_samurai_env(
 
 
 if __name__ == "__main__":
-    # Test the PRIME-optimized wrapper
-    print("🧪 Testing PRIME-optimized SamuraiShowdownCustomWrapper...")
+    # Test the PRIME-optimized wrapper with Simple CNN
+    print("🧪 Testing PRIME-optimized SamuraiShowdownCustomWrapper (Simple CNN)...")
 
     try:
         env = make_samurai_env(rendering=False)
@@ -717,7 +594,7 @@ if __name__ == "__main__":
         print(f"📊 PRIME stats: {env.current_stats}")
 
         env.close()
-        print("✅ PRIME-optimized wrapper test completed successfully!")
+        print("✅ PRIME-optimized wrapper test completed successfully (Simple CNN)!")
 
     except Exception as e:
         print(f"❌ Wrapper test failed: {e}")
