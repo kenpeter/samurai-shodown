@@ -18,11 +18,10 @@ from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.policies import ActorCriticCnnPolicy
 from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 
-# Import the wrapper and ALL feature extractors
+# Import the wrapper and feature extractors
 from wrapper import (
     SamuraiShowdownCustomWrapper,
-    UltraLightCNNFeatureExtractor,
-    EfficientNetB3FeatureExtractor,  # UPDATED: Import B3 extractor
+    EfficientNetB3FeatureExtractor,  # Only B3 extractor
 )
 
 
@@ -288,15 +287,14 @@ def main():
     parser.add_argument(
         "--model-size",
         type=str,
-        default="efficientnet-b3",  # UPDATED: B3 as default
+        default="efficientnet-b3",  # B3 as default
         choices=[
-            "ultra-light",
             "lightweight",
             "full",
             "basic",
             "efficientnet-b3",
-        ],  # UPDATED: B3 instead of B2
-        help="Model size: ultra-light (~1GB), lightweight (custom CNN ~2GB), full (custom deep CNN ~3GB), basic (custom CNN ~2GB), efficientnet-b3 (ImageNet B3 OPTIMIZED for 11GB GPU)",
+        ],  # REMOVED: ultra-light
+        help="Model size: lightweight (custom CNN ~2GB), full (custom deep CNN ~3GB), basic (custom CNN ~2GB), efficientnet-b3 (ImageNet B3 OPTIMIZED for 11GB GPU)",
     )
 
     args = parser.parse_args()
@@ -435,25 +433,19 @@ def main():
     vram_before = torch.cuda.memory_allocated() / (1024**3) if device == "cuda" else 0
     print(f"   VRAM before model: {vram_before:.2f} GB")
 
-    # UPDATED: Select feature extractor based on model size - NOW WITH B3 SUPPORT
+    # UPDATED: Select feature extractor based on model size - B3 FOCUSED
     if args.model_size == "efficientnet-b3":
-        feature_extractor_class = EfficientNetB3FeatureExtractor  # UPDATED: B3 support
+        feature_extractor_class = EfficientNetB3FeatureExtractor  # B3 support
         print(f"🧠 Using EFFICIENTNET-B3 (OPTIMIZED for 11GB GPU)")
         features_dim = 512
-    elif args.model_size == "ultra-light":
-        feature_extractor_class = UltraLightCNNFeatureExtractor
-        print(f"🧠 Using ULTRA-LIGHT CNN (~1GB VRAM - safest for 11GB GPU)")
-        features_dim = 256
     elif args.model_size == "lightweight":
         feature_extractor_class = (
-            DeepCNNFeatureExtractor  # UPDATED: Use Deep CNN for lightweight
+            DeepCNNFeatureExtractor  # Use Deep CNN for lightweight
         )
         print(f"🧠 Using LIGHTWEIGHT Custom CNN (~2GB VRAM)")
         features_dim = 512
     elif args.model_size == "full":
-        feature_extractor_class = (
-            DeepCNNFeatureExtractor  # UPDATED: Use Deep CNN for full
-        )
+        feature_extractor_class = DeepCNNFeatureExtractor  # Use Deep CNN for full
         print(f"🧠 Using FULL Custom CNN (~3GB VRAM)")
         features_dim = 512
     else:  # basic
@@ -475,10 +467,9 @@ def main():
         else:
             batch_size = min(128, total_buffer_size)
             print(f"📊 Larger batch size {batch_size} for B3 with {args.target_vram}GB")
-    elif args.model_size == "ultra-light" and batch_size > 64:
-        batch_size = 64
+    else:  # All other models use default calculated batch size
         print(
-            f"📊 Reduced batch size to {batch_size} for ultra-light model (memory safety)"
+            f"📊 Using calculated batch size {batch_size} for {args.model_size} model"
         )
 
     if args.resume and os.path.exists(args.resume):
@@ -502,8 +493,6 @@ def main():
                 pi=[512, 256],  # Simplified for 11GB GPU
                 vf=[512, 256],  # Simplified for 11GB GPU
             )
-        elif args.model_size == "ultra-light":
-            net_arch = dict(pi=[256, 128], vf=[256, 128])  # Smaller networks
         else:
             net_arch = dict(pi=[512, 256, 128], vf=[512, 256, 128])  # Standard networks
 
@@ -651,7 +640,7 @@ def main():
         f"   Run with: python train.py --model-size efficientnet-b3 --target-vram 10.0 --batch-size 32"
     )
     print(
-        f"   For lower VRAM: python train.py --model-size ultra-light --target-vram 8.0"
+        f"   For lower VRAM: python train.py --model-size lightweight --target-vram 8.0"
     )
     if args.model_size == "efficientnet-b3":
         print(f"   🎯 Expected: B3 performance optimized for 11GB GPU! 🚀")
