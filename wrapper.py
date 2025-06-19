@@ -178,6 +178,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 self.implicit_prm.parameters(), lr=prm_lr
             )
 
+            # CRITICAL: CNN Feature Extractor reference
+            self.cnn_feature_extractor = None  # Will be set by training script
+
             # PRIME tracking
             self.episode_features = []
             self.episode_process_rewards = []
@@ -186,8 +189,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.prm_update_frequency = 4  # Update every N episodes
             self.episodes_since_prm_update = 0
 
-            # Simple feature extractor for PRIME (will be replaced by proper CNN features)
-            self.feature_dim = 512
             print(
                 f"🎯 PRIME enabled with weights: process={process_weight}, outcome={outcome_weight}"
             )
@@ -242,16 +243,54 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         print(f"   🖼️  Frame size: {self.target_height}x{self.target_width}")
         print(f"   🌈 Input channels: {channels} (RGB only)")
 
+    def set_cnn_feature_extractor(self, feature_extractor):
+        """
+        CRITICAL: Set the CNN feature extractor for proper PRIME integration
+        This connects the same CNN used by the policy to the PRIME system
+        """
+        self.cnn_feature_extractor = feature_extractor
+        print(f"🔗 CNN Feature Extractor connected to PRIME!")
+        print(f"   🧠 Same CNN features now used for both policy and process rewards")
+
+    def _extract_cnn_features(self, observation: np.ndarray) -> torch.Tensor:
+        """
+        Extract CNN features using the ACTUAL feature extractor from PPO
+        This replaces the placeholder simple features and ensures proper PRIME integration
+        """
+        if not self.enable_prime:
+            return None
+
+        if self.cnn_feature_extractor is None:
+            # Fallback: create simple features if CNN not connected yet
+            return self._extract_simple_features(observation)
+
+        try:
+            # Convert observation to tensor (same format as policy expects)
+            if isinstance(observation, np.ndarray):
+                obs_tensor = (
+                    torch.from_numpy(observation).unsqueeze(0).to(self.device).float()
+                )
+            else:
+                obs_tensor = observation.unsqueeze(0).to(self.device).float()
+
+            # Extract features using the SAME CNN as the policy
+            with torch.no_grad():
+                features = self.cnn_feature_extractor(obs_tensor)
+                return features.squeeze()  # Remove batch dimension
+
+        except Exception as e:
+            print(f"⚠️ CNN feature extraction failed: {e}")
+            return self._extract_simple_features(observation)
+
     def _extract_simple_features(self, observation: np.ndarray) -> torch.Tensor:
         """
-        Extract simple features from observation for PRIME
-        This is a placeholder - in full implementation, this would be done by the CNN feature extractor
+        Fallback: Extract simple features from observation for PRIME
+        Only used if CNN feature extractor is not available yet
         """
         # Simple feature extraction: flatten and reduce observation
         obs_flat = observation.flatten()
 
-        # Sample features (this would be replaced by proper CNN features)
-        # For now, create a simple feature vector
+        # Create basic feature vector
         features = np.array(
             [
                 np.mean(obs_flat),  # Average pixel value
@@ -260,44 +299,47 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 np.min(obs_flat),  # Min pixel value
                 len(obs_flat),  # Size (constant)
             ]
-            + [0.0] * (self.feature_dim - 5)
-        )  # Pad to feature_dim
+            + [0.0] * 507
+        )  # Pad to 512 dimensions
 
-        return torch.tensor(features[: self.feature_dim], dtype=torch.float32).to(
-            self.device
-        )
+        return torch.tensor(features[:512], dtype=torch.float32).to(self.device)
 
     def _calculate_implicit_process_reward(
         self, current_features: torch.Tensor
     ) -> float:
         """
         Calculate implicit process reward using PRIME methodology
+        Now uses proper CNN features!
         """
         if not self.enable_prime or current_features is None:
             return 0.0
 
-        with torch.no_grad():
-            # Get process reward from implicit PRM
-            process_reward_raw, _ = self.implicit_prm(current_features.unsqueeze(0))
-            process_reward_raw = process_reward_raw.squeeze()
+        try:
+            with torch.no_grad():
+                # Get process reward from implicit PRM
+                process_reward_raw, _ = self.implicit_prm(current_features.unsqueeze(0))
+                process_reward_raw = process_reward_raw.squeeze()
 
-            # Calculate baseline from reference features
-            if len(self.reference_features) > 10:
-                ref_features_stack = torch.stack(
-                    list(self.reference_features)[-50:]
-                )  # Use last 50
-                ref_rewards, _ = self.implicit_prm(ref_features_stack)
-                baseline = torch.mean(ref_rewards)
-            else:
-                baseline = 0.0
+                # Calculate baseline from reference features
+                if len(self.reference_features) > 10:
+                    ref_features_stack = torch.stack(
+                        list(self.reference_features)[-50:]
+                    )  # Use last 50
+                    ref_rewards, _ = self.implicit_prm(ref_features_stack)
+                    baseline = torch.mean(ref_rewards)
+                else:
+                    baseline = 0.0
 
-            # Implicit process reward = current - baseline
-            implicit_reward = float(process_reward_raw - baseline)
+                # Implicit process reward = current - baseline
+                implicit_reward = float(process_reward_raw - baseline)
 
-            # Normalize to reasonable range for fighting games
-            implicit_reward = np.clip(implicit_reward, -0.5, 0.5)
+                # Normalize to reasonable range for fighting games
+                implicit_reward = np.clip(implicit_reward, -0.5, 0.5)
 
-            return implicit_reward
+                return implicit_reward
+        except Exception as e:
+            print(f"⚠️ Process reward calculation failed: {e}")
+            return 0.0
 
     def _update_implicit_prm(self, episode_outcome: float):
         """
@@ -648,7 +690,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                         if self.episode_process_rewards
                         else 0
                     )
+                    cnn_connected = (
+                        "✅" if self.cnn_feature_extractor is not None else "❌"
+                    )
                     print(f"   🧠 Avg Process Reward: {avg_process_reward:.3f}")
+                    print(f"   🔗 CNN Connected: {cnn_connected}")
                     print(f"   🎯 Reference Features: {len(self.reference_features)}")
                 print(f"   🕐 Session: {session_time/60:.1f} min")
                 print(f"   📈 Total Steps: {self.total_steps:,}")
@@ -701,10 +747,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         stacked_obs = self._stack_observation()
 
-        # Initialize PRIME features
+        # Initialize PRIME features using CNN features
         if self.enable_prime:
-            self.last_features = self._extract_simple_features(stacked_obs)
-            self.episode_features.append(self.last_features.clone())
+            self.last_features = self._extract_cnn_features(stacked_obs)
+            if self.last_features is not None:
+                self.episode_features.append(self.last_features.clone())
 
         return stacked_obs, info
 
@@ -762,11 +809,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.frame_stack.append(processed_frame)
         stacked_obs = self._stack_observation()
 
-        # Update PRIME features
+        # FIXED: Update PRIME features using CNN features
         if self.enable_prime:
-            current_features = self._extract_simple_features(stacked_obs)
-            self.episode_features.append(current_features.clone())
-            self.last_features = current_features
+            current_features = self._extract_cnn_features(
+                stacked_obs
+            )  # ✅ NOW USING CNN!
+            if current_features is not None:
+                self.episode_features.append(current_features.clone())
+                self.last_features = current_features
 
         # Update episode tracking
         self.episode_steps += 1
@@ -792,6 +842,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                         if self.episode_process_rewards
                         else 0.0
                     ),
+                    "cnn_connected": self.cnn_feature_extractor is not None,
                 }
             )
 
@@ -828,6 +879,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(f"      • Outcome weight: {self.outcome_weight}")
                 print(
                     f"      • Reference features collected: {len(self.reference_features)}"
+                )
+                print(
+                    f"      • CNN connected: {'✅' if self.cnn_feature_extractor is not None else '❌'}"
                 )
                 if self.episode_process_rewards:
                     print(
@@ -889,6 +943,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                         else 0.0
                     ),
                     "episodes_since_prm_update": self.episodes_since_prm_update,
+                    "cnn_connected": self.cnn_feature_extractor is not None,
                 }
             )
         else:
@@ -924,4 +979,5 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             "episode_length": len(self.episode_features),
             "total_process_reward": sum(self.episode_process_rewards),
             "reference_features_count": len(self.reference_features),
+            "cnn_connected": self.cnn_feature_extractor is not None,
         }
