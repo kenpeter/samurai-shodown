@@ -75,7 +75,7 @@ class ImplicitPRM(nn.Module):
 
 
 class SamuraiShowdownCustomWrapper(gym.Wrapper):
-    """Enhanced wrapper with PRIME implicit PRM integration for fighting games"""
+    """Enhanced wrapper with PRIME integration - USING ONLY REAL GAME DATA"""
 
     def __init__(
         self,
@@ -84,11 +84,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         rendering=False,
         max_episode_steps=12000,
         reward_coeff=1.0,
-        prediction_horizon=30,
-        # Fighting game specific reward parameters
-        distance_lambda=0.05,
-        combo_multiplier=1.5,
-        defensive_bonus=2.0,
         # PRIME specific parameters
         enable_prime=True,
         process_weight=0.3,
@@ -104,39 +99,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.num_frames = 9
         self.frame_stack = deque(maxlen=self.num_frames)
 
-        # Health tracking
-        self.full_hp = 128
+        # Health tracking - USING ONLY REAL GAME DATA
+        self.full_hp = 128  # Based on typical fighting game health (8-bit value)
         self.prev_player_health = self.full_hp
         self.prev_opponent_health = self.full_hp
-
-        # Fighting game reward parameters
-        self.distance_lambda = distance_lambda
-        self.combo_multiplier = combo_multiplier
-        self.defensive_bonus = defensive_bonus
-
-        # Optimal fighting distance (estimated for 2D fighting games)
-        self.optimal_distance = 80  # Pixels - adjust based on game
-
-        # Combo tracking
-        self.current_combo_length = 0
-        self.last_hit_time = 0
-        self.combo_timeout = 30  # frames
-
-        # Defensive action tracking
-        self.consecutive_blocks = 0
-        self.last_block_time = 0
-
-        # Position tracking
-        self.prev_player_x = 0
-        self.prev_opponent_x = 0
-
-        # Reward system weights (based on research)
-        self.reward_weights = {
-            "sparse_win_loss": 0.6,
-            "dense_performance": 0.2,
-            "shaped_positioning": 0.1,
-            "intrinsic_exploration": 0.1,
-        }
 
         # Episode management
         self.max_episode_steps = max_episode_steps
@@ -155,11 +121,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.episode_lengths = deque(maxlen=100)
         self.win_streak = 0
         self.best_win_streak = 0
-
-        # Fighting game specific stats
-        self.total_combos = 0
-        self.total_blocks = 0
-        self.avg_combo_length = 0
 
         # PRIME Integration
         self.enable_prime = enable_prime
@@ -193,7 +154,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 f"🎯 PRIME enabled with weights: process={process_weight}, outcome={outcome_weight}"
             )
         else:
-            print(f"🎯 PRIME disabled - using standard multi-component rewards")
+            print(f"🎯 PRIME disabled - using simplified rewards")
 
         # Logging
         self.last_log_time = time.time()
@@ -216,7 +177,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"⚡ FIGHTING GAME OPTIMIZED WRAPPER")
+        print(f"⚡ SAMURAI SHODOWN WRAPPER (CORRECTED)")
         print(f"   🎮 Action space: {self.env.action_space}")
         print(f"   🎮 Using MultiBinary action space")
         if self.enable_prime:
@@ -224,20 +185,11 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             print(
                 f"   🎯 Process/Outcome weights: {process_weight:.1f}/{outcome_weight:.1f}"
             )
-        print(f"   🎯 Multi-component rewards (NORMALIZED):")
-        print(
-            f"      • Sparse win/loss: {self.reward_weights['sparse_win_loss']:.1f} × [-1, +1]"
-        )
-        print(
-            f"      • Dense performance: {self.reward_weights['dense_performance']:.1f} × [-1, +1]"
-        )
-        print(
-            f"      • Spacing/distance: {self.reward_weights['shaped_positioning']:.1f} × [-0.1, +0.1]"
-        )
-        print(
-            f"      • Combo/defensive: {self.reward_weights['intrinsic_exploration']:.1f} × [0, +1]"
-        )
-        print(f"   📐 Total reward range: [-2.0, +2.0] (clipped)")
+        print(f"   📊 Available game data:")
+        print(f"      • health: player health (8-bit)")
+        print(f"      • enemy_health: opponent health (8-bit)")
+        print(f"      • round: current round number")
+        print(f"      • score: player score (32-bit)")
         print(f"   📏 Episode length: {max_episode_steps} steps")
         print(f"   📊 Frame stack: {self.num_frames} frames")
         print(f"   🖼️  Frame size: {self.target_height}x{self.target_width}")
@@ -250,12 +202,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         """
         self.cnn_feature_extractor = feature_extractor
         print(f"🔗 CNN Feature Extractor connected to PRIME!")
-        print(f"   🧠 Same CNN features now used for both policy and process rewards")
 
     def _extract_cnn_features(self, observation: np.ndarray) -> torch.Tensor:
         """
         Extract CNN features using the ACTUAL feature extractor from PPO
-        This replaces the placeholder simple features and ensures proper PRIME integration
         """
         if not self.enable_prime:
             return None
@@ -309,7 +259,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
     ) -> float:
         """
         Calculate implicit process reward using PRIME methodology
-        Now uses proper CNN features!
         """
         if not self.enable_prime or current_features is None:
             return 0.0
@@ -386,31 +335,19 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             return None
 
     def _extract_game_state(self, info):
-        """Extract enhanced game state information for fighting games"""
-        # Basic health information
+        """Extract ONLY the real game state from actual Samurai Shodown data"""
+
+        # ONLY use the actual data available in your integration:
         player_health = info.get("health", self.full_hp)
         opponent_health = info.get("enemy_health", self.full_hp)
-
-        # Position information (if available)
-        player_x = info.get("player_x", self.prev_player_x)
-        opponent_x = info.get("opponent_x", self.prev_opponent_x)
-
-        # Combat state information
-        player_action = info.get("player_action", 0)
-        opponent_action = info.get("opponent_action", 0)
+        current_round = info.get("round", 1)
+        player_score = info.get("score", 0)
 
         return {
             "player_health": player_health,
             "opponent_health": opponent_health,
-            "player_x": player_x,
-            "opponent_x": opponent_x,
-            "player_action": player_action,
-            "opponent_action": opponent_action,
-            "distance": (
-                abs(player_x - opponent_x)
-                if player_x != opponent_x
-                else self.optimal_distance
-            ),
+            "round": current_round,
+            "score": player_score,
         }
 
     def _process_frame(self, rgb_frame):
@@ -461,129 +398,55 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         stacked = np.concatenate(stacked_frames, axis=0)
         return stacked
 
-    def _extract_health(self, info):
-        """Extract health information"""
-        player_health = info.get("health", self.full_hp)
-        opponent_health = info.get("enemy_health", self.full_hp)
-        return player_health, opponent_health
-
-    def _calculate_distance_reward(self, current_distance):
-        """Calculate normalized distance-based reward for proper spacing (footsies)"""
-        distance_diff = abs(self.optimal_distance - current_distance)
-        distance_reward = -self.distance_lambda * (
-            distance_diff / self.optimal_distance
-        )
-
-        if distance_diff < self.optimal_distance * 0.2:
-            distance_reward += 0.05
-
-        return np.clip(distance_reward, -0.1, 0.1)
-
-    def _update_combo_tracking(self, opponent_damage_dealt, current_time):
-        """Track combo system for progressive rewards"""
-        if opponent_damage_dealt > 0:
-            if current_time - self.last_hit_time <= self.combo_timeout:
-                self.current_combo_length += 1
-            else:
-                if self.current_combo_length > 1:
-                    self.total_combos += 1
-                self.current_combo_length = 1
-            self.last_hit_time = current_time
-        else:
-            if current_time - self.last_hit_time > self.combo_timeout:
-                if self.current_combo_length > 1:
-                    self.total_combos += 1
-                self.current_combo_length = 0
-
-    def _calculate_combo_reward(self, opponent_damage_dealt):
-        """Calculate normalized progressive combo rewards"""
-        if opponent_damage_dealt > 0 and self.current_combo_length > 1:
-            base_reward = min(opponent_damage_dealt / 20.0, 0.3)
-            combo_bonus = min(
-                self.combo_multiplier * (self.current_combo_length - 1) * 0.1, 0.5
-            )
-
-            execution_bonus = 0.0
-            if self.current_combo_length >= 3:
-                execution_bonus = 0.1
-            if self.current_combo_length >= 5:
-                execution_bonus = 0.2
-
-            total_combo_reward = base_reward + combo_bonus + execution_bonus
-            return min(total_combo_reward, 1.0)
-        return 0.0
-
-    def _calculate_defensive_reward(self, player_damage_taken, info):
-        """Calculate normalized defensive rewards for blocks and reversals"""
-        defensive_reward = 0.0
-
-        if player_damage_taken == 0:
-            opponent_action = info.get("opponent_action", 0)
-            if opponent_action > 0:
-                self.consecutive_blocks += 1
-                self.total_blocks += 1
-
-                defensive_reward += 0.1
-                if self.consecutive_blocks >= 2:
-                    defensive_reward += 0.2
-                if self.consecutive_blocks >= 4:
-                    defensive_reward += 0.3
-        else:
-            self.consecutive_blocks = 0
-
-        if player_damage_taken == 0 and self.consecutive_blocks >= 2:
-            defensive_reward += min(self.defensive_bonus * 0.05, 0.2)
-
-        return min(defensive_reward, 1.0)
-
-    def _calculate_multi_component_reward(
+    def _calculate_reward(
         self, curr_player_health, curr_opponent_health, game_state, info
     ):
-        """Multi-component reward system with PRIME integration"""
+        """
+        Simple reward calculation using ONLY real game data
+        No fabricated distance/position data
+        """
 
-        # Standard multi-component reward calculation
-        sparse_reward = 0.0
-        done = False
-
+        # Calculate health changes (damage dealt/received)
         opponent_damage = self.prev_opponent_health - curr_opponent_health
         player_damage = self.prev_player_health - curr_player_health
 
-        dense_reward = 0.0
+        # Base reward from actual game outcomes
+        base_reward = 0.0
+        done = False
+        episode_outcome = 0.5  # Default neutral outcome
+
+        # Reward for dealing damage to opponent
         if opponent_damage > 0:
-            dense_reward = min(opponent_damage / 15.0, 1.0)
-        elif player_damage > 0:
-            dense_reward = -min(player_damage / 15.0, 1.0)
+            base_reward += min(opponent_damage / 10.0, 1.0)  # Normalize to max +1.0
 
-        current_distance = game_state.get("distance", self.optimal_distance)
-        positioning_reward = self._calculate_distance_reward(current_distance)
+        # Penalty for taking damage
+        if player_damage > 0:
+            base_reward -= min(player_damage / 10.0, 1.0)  # Normalize to max -1.0
 
-        self._update_combo_tracking(opponent_damage, self.episode_steps)
-        combo_reward = self._calculate_combo_reward(opponent_damage)
-        defensive_reward = self._calculate_defensive_reward(player_damage, info)
-
-        exploration_reward = min((combo_reward + defensive_reward) / 2.0, 1.0)
-
-        # Check for round end and determine outcome
-        episode_outcome = 0.5  # Default to draw
+        # Check for round end using ONLY real data
         if curr_player_health <= 0 or curr_opponent_health <= 0:
             self.total_rounds += 1
 
             if curr_opponent_health <= 0 and curr_player_health > 0:
-                sparse_reward = 1.0
-                episode_outcome = 1.0  # Win
+                # Player won
+                base_reward += 5.0  # Large win bonus
+                episode_outcome = 1.0
                 self.wins += 1
                 self.win_streak += 1
                 self.best_win_streak = max(self.best_win_streak, self.win_streak)
+
                 win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
                 print(
                     f"🏆 WIN! Round {self.total_rounds} | {self.wins}W/{self.losses}L ({win_rate:.1%}) | Streak: {self.win_streak}"
                 )
 
             elif curr_player_health <= 0 and curr_opponent_health > 0:
-                sparse_reward = -1.0
-                episode_outcome = 0.0  # Loss
+                # Player lost
+                base_reward -= 5.0  # Large loss penalty
+                episode_outcome = 0.0
                 self.losses += 1
                 self.win_streak = 0
+
                 win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
                 print(
                     f"💀 LOSS! Round {self.total_rounds} | {self.wins}W/{self.losses}L ({win_rate:.1%}) | Streak: 0"
@@ -605,14 +468,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
             self._log_periodic_stats()
 
-        # Combine standard rewards
-        base_reward = (
-            self.reward_weights["sparse_win_loss"] * sparse_reward
-            + self.reward_weights["dense_performance"] * dense_reward
-            + self.reward_weights["shaped_positioning"] * positioning_reward
-            + self.reward_weights["intrinsic_exploration"] * exploration_reward
-        )
-
         # Add PRIME process reward if enabled
         if self.enable_prime and self.last_features is not None:
             process_reward = self._calculate_implicit_process_reward(self.last_features)
@@ -625,18 +480,17 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         else:
             total_reward = base_reward
 
-        total_reward = np.clip(total_reward, -2.5, 2.5)
+        # Reasonable clipping for fighting games
+        total_reward = np.clip(total_reward, -10.0, 10.0)
 
         # Update tracking variables
         self.prev_player_health = curr_player_health
         self.prev_opponent_health = curr_opponent_health
-        self.prev_player_x = game_state.get("player_x", self.prev_player_x)
-        self.prev_opponent_x = game_state.get("opponent_x", self.prev_opponent_x)
 
         return total_reward, done
 
     def _log_periodic_stats(self):
-        """Enhanced logging with fighting game and PRIME statistics"""
+        """Enhanced logging with real game data only"""
         current_time = time.time()
         time_since_last_log = current_time - self.last_log_time
 
@@ -652,17 +506,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     np.mean(self.episode_lengths) if self.episode_lengths else 0
                 )
 
-                blocks_per_round = (
-                    self.total_blocks / self.total_rounds
-                    if self.total_rounds > 0
-                    else 0
-                )
-                combos_per_round = (
-                    self.total_combos / self.total_rounds
-                    if self.total_rounds > 0
-                    else 0
-                )
-
                 if win_rate >= 70:
                     performance = "🏆 EXCELLENT"
                 elif win_rate >= 50:
@@ -672,7 +515,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 else:
                     performance = "🎯 LEARNING"
 
-                print(f"\n📊 FIGHTING GAME TRAINING STATS:")
+                print(f"\n📊 SAMURAI SHODOWN TRAINING STATS:")
                 print(f"   {performance} | Win Rate: {win_rate:.1f}%")
                 print(
                     f"   🎮 Rounds: {self.total_rounds} ({self.wins}W/{self.losses}L)"
@@ -682,8 +525,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 )
                 print(f"   💰 Avg Reward: {avg_episode_reward:.2f}")
                 print(f"   ⏱️  Avg Episode: {avg_episode_length:.0f} steps")
-                print(f"   🥊 Combos/Round: {combos_per_round:.1f}")
-                print(f"   🛡️ Blocks/Round: {blocks_per_round:.1f}")
+
                 if self.enable_prime:
                     avg_process_reward = (
                         np.mean(self.episode_process_rewards)
@@ -696,6 +538,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     print(f"   🧠 Avg Process Reward: {avg_process_reward:.3f}")
                     print(f"   🔗 CNN Connected: {cnn_connected}")
                     print(f"   🎯 Reference Features: {len(self.reference_features)}")
+
                 print(f"   🕐 Session: {session_time/60:.1f} min")
                 print(f"   📈 Total Steps: {self.total_steps:,}")
                 print()
@@ -706,15 +549,10 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         """Reset environment for new episode"""
         observation, info = self.env.reset(**kwargs)
 
-        # Reset health tracking
-        self.prev_player_health = self.full_hp
-        self.prev_opponent_health = self.full_hp
-
-        # Reset fighting game specific tracking
-        self.current_combo_length = 0
-        self.consecutive_blocks = 0
-        self.last_hit_time = 0
-        self.last_block_time = 0
+        # Reset health tracking using real data
+        game_state = self._extract_game_state(info)
+        self.prev_player_health = game_state["player_health"]
+        self.prev_opponent_health = game_state["opponent_health"]
 
         # Reset PRIME tracking
         if self.enable_prime:
@@ -756,7 +594,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, info
 
     def step(self, action):
-        """Enhanced step with PRIME process rewards and fighting game optimizations"""
+        """Enhanced step using ONLY real game data"""
 
         # Action handling
         try:
@@ -793,11 +631,13 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             stacked_obs = self._stack_observation()
             return stacked_obs, -1.0, True, True, {"error": str(e)}
 
-        # Extract enhanced game state and calculate reward
+        # Extract game state using ONLY real data
         game_state = self._extract_game_state(info)
-        curr_player_health, curr_opponent_health = self._extract_health(info)
+        curr_player_health = game_state["player_health"]
+        curr_opponent_health = game_state["opponent_health"]
 
-        custom_reward, custom_done = self._calculate_multi_component_reward(
+        # Calculate reward using ONLY real game data
+        custom_reward, custom_done = self._calculate_reward(
             curr_player_health, curr_opponent_health, game_state, info
         )
 
@@ -809,11 +649,9 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         self.frame_stack.append(processed_frame)
         stacked_obs = self._stack_observation()
 
-        # FIXED: Update PRIME features using CNN features
+        # Update PRIME features using CNN features
         if self.enable_prime:
-            current_features = self._extract_cnn_features(
-                stacked_obs
-            )  # ✅ NOW USING CNN!
+            current_features = self._extract_cnn_features(stacked_obs)
             if current_features is not None:
                 self.episode_features.append(current_features.clone())
                 self.last_features = current_features
@@ -849,8 +687,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         return stacked_obs, custom_reward, done, truncated, info
 
     def close(self):
-        """Clean shutdown with enhanced fighting game and PRIME statistics"""
-        print(f"\n🏁 FINAL FIGHTING GAME STATISTICS:")
+        """Clean shutdown with real statistics"""
+        print(f"\n🏁 FINAL SAMURAI SHODOWN STATISTICS:")
 
         if self.total_rounds > 0:
             final_win_rate = self.wins / self.total_rounds * 100
@@ -863,8 +701,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             print(f"   🔥 Best Win Streak: {self.best_win_streak}")
             print(f"   📊 Total Episodes: {self.total_episodes}")
             print(f"   📈 Total Steps: {self.total_steps:,}")
-            print(f"   🥊 Total Combos: {self.total_combos}")
-            print(f"   🛡️ Total Blocks: {self.total_blocks}")
             print(f"   🕐 Session Time: {session_time/3600:.2f} hours")
 
             if self.episode_rewards:
@@ -877,9 +713,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 print(f"   🧠 PRIME Statistics:")
                 print(f"      • Process weight: {self.process_weight}")
                 print(f"      • Outcome weight: {self.outcome_weight}")
-                print(
-                    f"      • Reference features collected: {len(self.reference_features)}"
-                )
+                print(f"      • Reference features: {len(self.reference_features)}")
                 print(
                     f"      • CNN connected: {'✅' if self.cnn_feature_extractor is not None else '❌'}"
                 )
@@ -889,28 +723,29 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                     )
 
             if final_win_rate >= 70:
-                summary = "🏆 EXCELLENT FIGHTING GAME PERFORMANCE!"
+                summary = "🏆 EXCELLENT SAMURAI SHODOWN PERFORMANCE!"
             elif final_win_rate >= 50:
-                summary = "⚔️ GOOD FIGHTING GAME PERFORMANCE!"
+                summary = "⚔️ GOOD SAMURAI SHODOWN PERFORMANCE!"
             elif final_win_rate >= 30:
-                summary = "📈 SOLID FIGHTING GAME IMPROVEMENT!"
+                summary = "📈 SOLID SAMURAI SHODOWN IMPROVEMENT!"
             else:
-                summary = "🎯 GOOD FIGHTING GAME LEARNING PROGRESS!"
+                summary = "🎯 GOOD SAMURAI SHODOWN LEARNING PROGRESS!"
 
             print(f"   {summary}")
             if self.enable_prime:
                 print(f"   🧠 PRIME implicit PRM system active")
                 print(f"   🎯 Dense process rewards implemented")
-            print(f"   ⚔️ Multi-component reward system active")
-            print(f"   🎯 Distance-based spacing rewards implemented")
-            print(f"   🥊 Progressive combo system active")
-            print(f"   🛡️ Defensive action rewards implemented")
+            print(f"   ⚔️ Reward system based on REAL game data only:")
+            print(f"      • health: player health changes")
+            print(f"      • enemy_health: opponent health changes")
+            print(f"      • score: player score (if used)")
+            print(f"      • round: round progression")
 
         super().close()
 
     @property
     def current_stats(self):
-        """Return current enhanced training statistics including PRIME metrics"""
+        """Return current training statistics"""
         win_rate = self.wins / self.total_rounds if self.total_rounds > 0 else 0
         avg_reward = np.mean(self.episode_rewards) if self.episode_rewards else 0
 
@@ -924,9 +759,6 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             "avg_episode_reward": avg_reward,
             "total_episodes": self.total_episodes,
             "total_steps": self.total_steps,
-            "total_combos": self.total_combos,
-            "total_blocks": self.total_blocks,
-            "avg_combo_length": self.avg_combo_length,
         }
 
         # Add PRIME-specific stats
