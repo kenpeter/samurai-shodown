@@ -14,6 +14,9 @@ python train.py --batch-size 3072 --n-steps 2048  --render --total-timesteps 100
 
 
 
+python train.py --batch-size 3072 --n-steps 512  --render --total-timesteps 1000000 --learning-rate 4e-4
+
+
 
 ~/anaconda3/envs/samurai-showdown/lib/python3.10/site-packages/retro/data/stable/SamuraiShodown-Genesis
 
