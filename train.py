@@ -83,7 +83,7 @@ class SimplePRMModel(nn.Module):
 
 
 class PRIMETrainingCallback(BaseCallback):
-    """PRIME callback with memory monitoring"""
+    """PRIME callback with memory monitoring - NO SCHEDULERS"""
 
     def __init__(self, prm_model=None, verbose=0):
         super(PRIMETrainingCallback, self).__init__(verbose)
@@ -92,82 +92,41 @@ class PRIMETrainingCallback(BaseCallback):
         self.process_rewards_history = deque(maxlen=1000)
         self.outcome_rewards_history = deque(maxlen=1000)
 
-        self.entropy_adjustments = 0
-
-    # Replace the existing entropy management section in your PRIMETrainingCallback._on_step() method:
-
     def _on_step(self) -> bool:
-        # Dual scheduler: Entropy + N_Steps - every 30k steps
-        if self.num_timesteps % 30000 == 0:
-            win_rate = 0.0
-            if hasattr(self.training_env, "get_attr"):
-                try:
-                    env_stats = self.training_env.get_attr("current_stats")[0]
-                    win_rate = env_stats.get("win_rate", 0)
-                except:
-                    pass
-
-            old_ent_coef = self.model.ent_coef
-            old_n_steps = self.model.n_steps
-
-            # Calculate training progress
-            total_steps = 10000000  # Your total training steps
-            progress = min(self.num_timesteps / total_steps, 1.0)
-
-            # Entropy scheduler: 0.9 → 0.1 with emergency boost
-            scheduled_entropy = 0.9 - (progress * 0.8)  # 0.9 down to 0.1
-
-            # N_Steps scheduler: Start short → get longer as training progresses
-            scheduled_n_steps = int(512 + (progress * 2560))  # 512 → 3072
-
-            # Emergency boost if win rate too low
-            if win_rate < 0.25:
-                target_entropy = 0.8  # Boost back to high exploration
-                target_n_steps = 3072  # Longer trajectories for better learning
-            else:
-                target_entropy = max(
-                    scheduled_entropy, 0.1
-                )  # Use schedule but not below 0.1
-                target_n_steps = max(scheduled_n_steps, 512)  # Not below 512
-
-            self.model.ent_coef = target_entropy
-            self.model.n_steps = target_n_steps
-
-            # Log changes
-            if (
-                abs(self.model.ent_coef - old_ent_coef) > 0.01
-                or abs(self.model.n_steps - old_n_steps) > 100
-            ):
-                self.entropy_adjustments += 1
-                print(f"\n🎛️ DUAL SCHEDULER #{self.entropy_adjustments}")
-                print(f"   📊 Progress: {progress*100:.1f}% through training")
-                print(f"   🎯 Win Rate: {win_rate*100:.1f}%")
-                print(f"   📅 Scheduled entropy: {scheduled_entropy:.3f}")
-                print(f"   📅 Scheduled n_steps: {scheduled_n_steps}")
-
-                if win_rate < 0.25:
-                    print(f"   🚨 Emergency boost: Low win rate detected")
-                    print(
-                        f"   🎲 ent_coef: {old_ent_coef:.3f} → {self.model.ent_coef:.3f} (emergency)"
-                    )
-                    print(
-                        f"   📏 n_steps: {old_n_steps} → {self.model.n_steps} (emergency)"
-                    )
-                else:
-                    print(
-                        f"   🎲 ent_coef: {old_ent_coef:.3f} → {self.model.ent_coef:.3f} (scheduled)"
-                    )
-                    print(
-                        f"   📏 n_steps: {old_n_steps} → {self.model.n_steps} (scheduled)"
-                    )
-
-        # Rest of your existing logging code...
+        # Log every 15000 steps for longer trajectories
         if (
             self.num_timesteps % 15000 == 0
             and self.num_timesteps != self.last_stats_log
         ):
-            # Your existing logging code stays the same
-            pass
+            self.last_stats_log = self.num_timesteps
+
+            print(f"\n📊 SIMPLE PRIME TRAINING - Step {self.num_timesteps:,}")
+
+            # Memory monitoring
+            if torch.cuda.is_available():
+                current_vram = torch.cuda.memory_allocated() / (1024**3)
+                max_vram = torch.cuda.max_memory_allocated() / (1024**3)
+                free_vram = torch.cuda.mem_get_info()[0] / (1024**3)
+                total_vram = torch.cuda.mem_get_info()[1] / (1024**3)
+
+                print(f"   💾 VRAM: {current_vram:.1f}GB / {max_vram:.1f}GB peak")
+                print(f"   💾 Free: {free_vram:.1f}GB / {total_vram:.1f}GB total")
+
+            # Get training stats
+            if hasattr(self.training_env, "get_attr"):
+                try:
+                    env_stats = self.training_env.get_attr("current_stats")[0]
+                    win_rate = env_stats.get("win_rate", 0) * 100
+                    wins = env_stats.get("wins", 0)
+                    losses = env_stats.get("losses", 0)
+
+                    print(f"   🎯 Win Rate: {win_rate:.1f}%")
+                    print(f"   🏆 Record: {wins}W/{losses}L")
+                    print(f"   🎛️ Entropy coefficient: {self.model.ent_coef:.4f}")
+                    print(f"   📏 N_steps: {self.model.n_steps}")
+                    print(f"   🚀 Simple CNN + LARGE batch training")
+                except:
+                    pass
 
         return True
 
@@ -238,13 +197,13 @@ def create_simple_prime_model(
         env,
         device=device,
         verbose=1,
-        n_steps=args.n_steps,  # LONG trajectories (3000+)
-        batch_size=args.batch_size,  # LARGE batches (2048+)
+        n_steps=args.n_steps,  # From arguments
+        batch_size=args.batch_size,  # From arguments
         n_epochs=2,  # Fewer epochs for large batches
         gamma=0.99,
         learning_rate=lr_schedule,
         clip_range=0.2,
-        ent_coef=0.05,  # Reduced for large batches
+        ent_coef=args.ent_coef,  # From arguments
         vf_coef=0.5,
         max_grad_norm=0.5,
         gae_lambda=0.95,
@@ -261,9 +220,10 @@ def create_simple_prime_model(
     )
 
     print(f"🧠 SIMPLE PRIME Model Created:")
-    print(f"   📊 LARGE batch size: {args.batch_size:,}")
-    print(f"   📏 LONG n_steps: {args.n_steps:,}")
-    print(f"   🎓 Efficient epochs: 2")
+    print(f"   📊 Batch size: {args.batch_size:,}")
+    print(f"   📏 N_steps: {args.n_steps:,}")
+    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
+    print(f"   🎓 Epochs: 2")
     print(f"   🚀 Simple CNN for maximum efficiency")
     print(f"   💾 Memory optimized for large scale training")
 
@@ -272,16 +232,21 @@ def create_simple_prime_model(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Simple CNN PRIME - Large Batch + Long Trajectories"
+        description="Simple CNN PRIME - Clean Version with Full Argument Control"
     )
     parser.add_argument("--total-timesteps", type=int, default=10000000)
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
+    parser.add_argument(
+        "--ent-coef", type=float, default=0.05, help="Entropy coefficient"
+    )
     parser.add_argument("--resume", type=str, default=None)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--use-default-state", action="store_true")
     parser.add_argument("--target-vram", type=float, default=11.6)
-    parser.add_argument("--n-steps", type=int, default=3072)  # LONG trajectories
-    parser.add_argument("--batch-size", type=int, default=2048)  # LARGE batch
+    parser.add_argument(
+        "--n-steps", type=int, default=3072, help="Number of steps per rollout"
+    )
+    parser.add_argument("--batch-size", type=int, default=2048, help="Batch size")
     parser.add_argument("--mixed-precision", action="store_true")
 
     args = parser.parse_args()
@@ -294,11 +259,12 @@ def main():
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
 
-    print(f"🚀 SIMPLE CNN PRIME - LARGE BATCH + LONG TRAJECTORIES")
+    print(f"🚀 SIMPLE CNN PRIME - CLEAN VERSION")
     print(f"   💻 Device: {device}")
-    print(f"   🎯 NO EfficientNet - Simple CNN only")
-    print(f"   📊 TARGET: batch_size={args.batch_size:,}")
-    print(f"   📏 TARGET: n_steps={args.n_steps:,}")
+    print(f"   🎯 Simple CNN only")
+    print(f"   📊 Batch size: {args.batch_size:,}")
+    print(f"   📏 N_steps: {args.n_steps:,}")
+    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
     print(f"   💾 Memory efficient for 11.6GB GPU")
     print(f"   🧠 PRIME methodology with simple architecture")
     print(f"   🚀 Fast training, excellent performance")
@@ -338,10 +304,11 @@ def main():
         )
         args.n_steps = new_n_steps
 
-    print(f"🔮 FINAL SIMPLE PRIME PARAMETERS:")
+    print(f"🔮 FINAL PARAMETERS:")
     print(f"   🎮 Environment: 1 (focused training)")
-    print(f"   💪 LARGE batch size: {args.batch_size:,}")
-    print(f"   📏 LONG n_steps: {args.n_steps:,}")
+    print(f"   💪 Batch size: {args.batch_size:,}")
+    print(f"   📏 N_steps: {args.n_steps:,}")
+    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
     print(f"   🌈 Channels: 12 (4-frame optimized)")
     print(f"   🧠 Simple CNN + PRIME rewards")
     print(f"   💾 Buffer/Batch ratio: {args.n_steps/args.batch_size:.1f}")
@@ -400,6 +367,11 @@ def main():
         print(f"📂 Loading model: {args.resume}")
         model = PPO.load(args.resume, env=env, device=device)
         prm_model = None
+
+        # Update parameters from arguments when resuming
+        model.ent_coef = args.ent_coef
+        print(f"🔄 Updated ent_coef to: {args.ent_coef:.4f}")
+
     else:
         print(f"🚀 Creating Simple PRIME model")
         model, prm_model = create_simple_prime_model(
@@ -426,8 +398,9 @@ def main():
     # Training
     start_time = time.time()
     print(f"🏋️ Starting SIMPLE PRIME Training")
-    print(f"   🚀 LARGE batch size: {args.batch_size:,}")
-    print(f"   📏 LONG trajectories: {args.n_steps:,}")
+    print(f"   🚀 Batch size: {args.batch_size:,}")
+    print(f"   📏 N_steps: {args.n_steps:,}")
+    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
     print(f"   🧠 Simple CNN + PRIME methodology")
     print(f"   💾 Memory efficient training")
 
@@ -448,6 +421,7 @@ def main():
             print(f"   🏆 Win Rate: {final_stats['win_rate']*100:.1f}%")
             print(f"   🎮 Total Rounds: {final_stats['total_rounds']}")
             print(f"   📊 Win/Loss: {final_stats['wins']}W/{final_stats['losses']}L")
+            print(f"   🎲 Final entropy coefficient: {model.ent_coef:.4f}")
 
     except Exception as e:
         print(f"❌ Simple PRIME training failed: {e}")
@@ -478,14 +452,23 @@ def main():
     print("   • Fast training: Simple CNN processes much faster")
     print("   • PRIME methodology: Dense process + sparse outcome rewards")
     print("   • Fighting game optimized: 4-frame temporal coverage")
+    print("   • Full argument control: No automatic schedulers")
 
-    print(f"\n🎮 SIMPLE PRIME USAGE:")
-    print(f"   Large batch: python train.py --batch-size 2048 --n-steps 3072")
-    print(f"   Maximum: python train.py --batch-size 3072 --n-steps 3072")
-    print(f"   Long traj: python train.py --batch-size 1536 --n-steps 4608")
-    print(f"   🚀 Expected: 65-85% win rate with simple but effective CNN")
+    print(f"\n🎮 USAGE EXAMPLES:")
+    print(f"   # Start fresh with high exploration:")
+    print(f"   python train.py --ent-coef 0.9 --n-steps 512 --batch-size 2048")
+    print(f"   ")
+    print(f"   # Medium exploration and longer trajectories:")
+    print(f"   python train.py --ent-coef 0.5 --n-steps 2048 --batch-size 2048")
+    print(f"   ")
+    print(f"   # Fine-tune with low exploration:")
+    print(f"   python train.py --ent-coef 0.1 --n-steps 3072 --batch-size 2048")
+    print(f"   ")
+    print(f"   # Resume with different settings:")
+    print(f"   python train.py --resume model.zip --ent-coef 0.3 --batch-size 1536")
+    print(f"   ")
+    print(f"   🎛️ Full control over entropy and n_steps via arguments!")
     print(f"   💾 Memory efficient: Perfect for 11.6GB GPU")
-    print(f"   🧠 Simple > Complex for RL in many cases!")
 
 
 if __name__ == "__main__":
