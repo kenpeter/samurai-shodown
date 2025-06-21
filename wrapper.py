@@ -180,23 +180,20 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             self.prev_action = action
             return 0.0
 
-        # 1. SCALED Health difference rewards (primary signal)
-
-        # agent health diff. enemy health diff
+        # 1. this quite important agent health diff. enemy health diff
         health_diff = self.prev_player_health - player_health
         enemy_health_diff = self.prev_enemy_health - enemy_health
 
-        # Scale by reward_scale for better gradients
-
         # if enemy health got damaged.
         if enemy_health_diff > 0:
+            # health diff get nromalized
             normalized_damage = enemy_health_diff / self.full_hp
             damage_reward = (
                 normalized_damage * 3.5 * self.reward_scale
             )  # Slightly increased for simple CNN
             reward += damage_reward
 
-            # Combo tracking - optimized for 4-frame window
+            # 1.1 Combo tracking - optimized for 4-frame window
             if self.step_count - self.last_damage_step <= 4:
                 self.combo_length += 1
                 combo_bonus = (
@@ -204,6 +201,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 )  # Enhanced for simple CNN
                 reward += combo_bonus
             else:
+                # combo breaks
                 self.combo_length = 1
             self.last_damage_step = self.step_count
 
@@ -213,14 +211,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             reward -= damage_penalty
             self.combo_length = 0  # Reset combo on taking damage
 
-        # 2. Health advantage (scaled)
+        # 2. health advantage
         health_advantage = (player_health - enemy_health) / self.full_hp
         advantage_reward = (
             health_advantage * 0.6 * self.reward_scale
         )  # Slightly increased
         reward += advantage_reward
 
-        # 3. Action diversity reward (prevent button mashing) - enhanced for large batch
+        # 3. action diversity
         if isinstance(action, np.ndarray):
             if action.ndim == 1:
                 current_action = tuple(action)
@@ -251,7 +249,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
                 diversity_bonus = 0.06 * self.reward_scale
                 reward += diversity_bonus
 
-        # 4. Combat engagement reward - enhanced for simple CNN
+        # 4. why this combat engagement (always changed means engagement)
         if enemy_health_diff > 0 or health_diff > 0:
             engagement_bonus = 0.15 * self.reward_scale  # Increased for simple CNN
             reward += engagement_bonus
