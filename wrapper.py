@@ -158,18 +158,22 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             "score": score,
         }
 
+    # process reward. self, game info, action, info
     def _calculate_process_reward(self, game_info, action, info):
         """
         PRIME-style dense process reward calculation
         OPTIMIZED: For large batch training with simple CNN
         Returns step-by-step dense rewards for better credit assignment
         """
+
+        # reward
         reward = 0.0
 
+        # player health, opponent health
         player_health = game_info["player_health"]
         enemy_health = game_info["opponent_health"]
 
-        # Initialize previous values if first step
+        # prev player health, prev opponent health
         if self.prev_player_health is None:
             self.prev_player_health = player_health
             self.prev_enemy_health = enemy_health
@@ -177,10 +181,14 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
             return 0.0
 
         # 1. SCALED Health difference rewards (primary signal)
+
+        # agent health diff. enemy health diff
         health_diff = self.prev_player_health - player_health
         enemy_health_diff = self.prev_enemy_health - enemy_health
 
         # Scale by reward_scale for better gradients
+
+        # if enemy health got damaged.
         if enemy_health_diff > 0:
             normalized_damage = enemy_health_diff / self.full_hp
             damage_reward = (
@@ -402,7 +410,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Get game information
         game_info = self._extract_game_state(info)
 
-        # Calculate PRIME-style rewards
+        # ok we have process reward here
         process_reward = self._calculate_process_reward(game_info, action, info)
         outcome_reward = self._calculate_outcome_reward(game_info, info)
 

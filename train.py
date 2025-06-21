@@ -35,74 +35,7 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
 # Import PRIME-optimized components (4-frame version)
-from wrapper import SamuraiShowdownCustomWrapper
-
-
-class SimplePRIMECNN(BaseFeaturesExtractor):
-    """
-    Simple CNN optimized for PRIME + Large Batch + Long Trajectories
-    Memory efficient and fast - perfect for fighting games
-    """
-
-    def __init__(self, observation_space: gym.spaces.Box, features_dim: int = 512):
-        super().__init__(observation_space, features_dim)
-
-        n_input_channels = observation_space.shape[0]  # 12 channels for 4-frame
-
-        print(f"🚀 Creating Simple PRIME CNN for LARGE BATCH training...")
-
-        # Simple but effective CNN architecture
-        self.cnn = nn.Sequential(
-            # First block - capture basic features
-            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=2),
-            nn.ReLU(inplace=True),
-            # Second block - spatial patterns
-            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            # Third block - higher level features
-            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(inplace=True),
-            # Fourth block - fighting game specific
-            nn.Conv2d(128, 256, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(inplace=True),
-            # Global pooling
-            nn.AdaptiveAvgPool2d(1),
-            nn.Flatten(),
-        )
-
-        # Calculate CNN output size
-        with torch.no_grad():
-            sample = torch.zeros(1, n_input_channels, 126, 180)
-            cnn_output_size = self.cnn(sample).shape[1]
-
-        # Simple classifier
-        self.classifier = nn.Sequential(
-            nn.Linear(cnn_output_size, 512),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(512, features_dim),
-            nn.ReLU(inplace=True),
-        )
-
-        print(f"🧠 SIMPLE PRIME CNN:")
-        print(f"   📊 Input: {observation_space.shape}")
-        print(f"   🎨 Input channels: {n_input_channels} (4-frame)")
-        print(f"   🏗️ CNN output: {cnn_output_size}")
-        print(f"   🎯 Final features: {features_dim}")
-        print(f"   💾 Memory efficient for LARGE batches")
-        print(f"   🚀 Perfect for batch_size=2048+ and n_steps=3000+")
-
-    def forward(self, observations: torch.Tensor) -> torch.Tensor:
-        # Simple normalization - much faster
-        x = observations.float() / 255.0
-
-        # CNN feature extraction
-        features = self.cnn(x)
-
-        # Final classification
-        output = self.classifier(features)
-
-        return output
+from wrapper import SamuraiShowdownCustomWrapper, SimplePRIMECNN
 
 
 class SimplePRMModel(nn.Module):

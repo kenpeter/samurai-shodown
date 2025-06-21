@@ -2,24 +2,42 @@ import os
 import argparse
 import time
 import numpy as np
+import cv2
 
-import retro
+# Use stable-retro for gymnasium compatibility
+try:
+    import stable_retro as retro
+
+    print("🎮 Using stable-retro (gymnasium compatible)")
+except ImportError:
+    try:
+        import retro
+
+        print("🎮 Using retro (legacy)")
+    except ImportError:
+        raise ImportError(
+            "Neither stable-retro nor retro found. Install with: pip install stable-retro"
+        )
+
 import gymnasium as gym
 from stable_baselines3 import PPO
 
-# Import the wrapper
+# Import the PRIME-optimized wrapper
 from wrapper import SamuraiShowdownCustomWrapper
 
 
 def create_eval_env(game, state):
-    """Create evaluation environment aligned with CUDA training setup"""
+    """
+    Create evaluation environment EXACTLY matching PRIME training setup
+    CRITICAL: Must match wrapper.py configuration precisely
+    """
     # Handle state file path
     if state and os.path.isfile(state):
         state_file = os.path.abspath(state)
-        print(f"Using custom state file: {state_file}")
+        print(f"🎮 Using custom state file: {state_file}")
     else:
         state_file = state
-        print(f"Using state: {state_file if state_file else 'default'}")
+        print(f"🎮 Using state: {state_file if state_file else 'default'}")
 
     # Create retro environment with rendering enabled
     env = retro.make(
@@ -30,80 +48,147 @@ def create_eval_env(game, state):
         render_mode="human",  # Enable rendering for human observation
     )
 
-    # Apply custom wrapper with same settings as CUDA training
-    # IMPORTANT: Must match training wrapper configuration exactly!
+    # Apply PRIME-optimized wrapper with EXACT training settings
+    # CRITICAL: These parameters must match training exactly!
     env = SamuraiShowdownCustomWrapper(
         env,
         reset_round=True,
         rendering=True,
-        max_episode_steps=15000,  # Match CUDA training configuration
+        max_episode_steps=15000,  # Match training configuration
+        frame_stack=4,  # 4 frames for memory efficiency
+        frame_skip=4,  # Match training frame skip
+        target_size=(180, 126),  # Match training target size (width, height)
     )
 
-    # Print observation space for debugging
-    print(f"🔍 Evaluation environment observation space: {env.observation_space.shape}")
+    # Verify observation space matches training expectations
+    expected_shape = (12, 180, 126)  # 4 frames × 3 RGB = 12 channels
+    actual_shape = env.observation_space.shape
+
+    print(f"🔍 Expected observation shape: {expected_shape}")
+    print(f"🔍 Actual observation shape: {actual_shape}")
+
+    if actual_shape == expected_shape:
+        print("✅ Observation shapes match perfectly!")
+    else:
+        print("⚠️ WARNING: Observation shape mismatch detected!")
+        print("   This may cause model prediction errors.")
 
     return env
 
 
-def convert_observation_format(obs, target_shape):
-    """Convert observation between different formats if needed"""
-    current_shape = obs.shape
+def validate_model_compatibility(model, env):
+    """
+    Validate that the loaded model is compatible with the evaluation environment
+    """
+    model_obs_shape = model.observation_space.shape
+    env_obs_shape = env.observation_space.shape
 
-    if current_shape == target_shape:
-        return obs
+    print(f"\n🔍 Model Compatibility Check:")
+    print(f"   Model expects: {model_obs_shape}")
+    print(f"   Environment provides: {env_obs_shape}")
 
-    # Handle shape mismatches
-    if len(current_shape) == 3 and len(target_shape) == 3:
-        # Check if it's just a dimension ordering issue
-        if (current_shape[0], current_shape[1], current_shape[2]) == (
-            target_shape[1],
-            target_shape[2],
-            target_shape[0],
-        ):
-            # Transpose from (H, W, C) to (C, H, W)
-            print(f"🔄 Converting observation from {current_shape} to {target_shape}")
-            return np.transpose(obs, (2, 0, 1))
-        elif (current_shape[0], current_shape[1], current_shape[2]) == (
-            target_shape[2],
-            target_shape[0],
-            target_shape[1],
-        ):
-            # Transpose from (C, H, W) to (H, W, C)
-            print(f"🔄 Converting observation from {current_shape} to {target_shape}")
-            return np.transpose(obs, (1, 2, 0))
+    if model_obs_shape == env_obs_shape:
+        print("✅ Perfect compatibility!")
+        return True
+    else:
+        print("❌ Shape mismatch detected!")
+        print("   This will likely cause prediction errors.")
+        return False
 
-    # If shapes are completely different, try to resize
-    if len(current_shape) == 3 and len(target_shape) == 3:
-        if current_shape[0] == target_shape[0]:  # Same number of channels/frames
-            print(f"🔄 Resizing observation from {current_shape} to {target_shape}")
-            # Simple nearest neighbor resize for each frame
-            resized_frames = []
-            for i in range(current_shape[0]):
-                frame = obs[i]
-                # Simple resize using array indexing
-                h_ratio = frame.shape[0] / target_shape[1]
-                w_ratio = frame.shape[1] / target_shape[2]
-                h_indices = (np.arange(target_shape[1]) * h_ratio).astype(int)
-                w_indices = (np.arange(target_shape[2]) * w_ratio).astype(int)
-                resized_frame = frame[np.ix_(h_indices, w_indices)]
-                resized_frames.append(resized_frame)
-            return np.stack(resized_frames, axis=0)
 
-    print(
-        f"⚠️  Warning: Cannot convert observation shape {current_shape} to {target_shape}"
-    )
-    return obs
+def test_model_prediction(model, env):
+    """
+    Test a single model prediction to ensure everything works
+    """
+    print("\n🧪 Testing model prediction...")
+    try:
+        obs, _ = env.reset()
+        print(f"   Reset obs shape: {obs.shape}")
+        print(f"   Reset obs type: {type(obs)}")
+        print(f"   Reset obs dtype: {obs.dtype}")
+
+        # Test prediction
+        action, _states = model.predict(obs, deterministic=True)
+        print(f"   Prediction successful: action = {action}")
+        print(f"   Action type: {type(action)}")
+        print("✅ Model prediction test passed!")
+        return True
+
+    except Exception as e:
+        print(f"❌ Model prediction test failed: {e}")
+        return False
+
+
+def analyze_episode_performance(info, episode_reward, step_count, outcome_reward):
+    """
+    Analyze episode performance using PRIME metrics
+    Fixed outcome detection using multiple signals
+    """
+    game_info = info.get("game_info", {})
+    player_health = game_info.get("player_health", 0)
+    opponent_health = game_info.get("opponent_health", 0)
+
+    # PRIME-specific metrics
+    process_reward = info.get("process_reward", 0)
+    combo_length = info.get("combo_length", 0)
+    win_rate = info.get("win_rate", 0) * 100 if info.get("win_rate") else 0
+
+    # IMPROVED outcome detection using multiple signals
+    outcome = "UNKNOWN"
+    outcome_emoji = "❓"
+
+    # Method 1: Use outcome_reward from PRIME wrapper (most reliable)
+    if outcome_reward > 0:
+        outcome = "WIN"
+        outcome_emoji = "🟢"
+    elif outcome_reward < 0:
+        outcome = "LOSS"
+        outcome_emoji = "🔴"
+    else:
+        # Method 2: Fallback to health comparison
+        if player_health > opponent_health:
+            outcome = "WIN"
+            outcome_emoji = "🟢"
+        elif opponent_health > player_health:
+            outcome = "LOSS"
+            outcome_emoji = "🔴"
+        else:
+            # Method 3: Check if both are dead (true draw or timeout)
+            if player_health <= 0 and opponent_health <= 0:
+                # Could be a draw or we need more info
+                if abs(episode_reward) < 1000:  # Small total reward suggests timeout
+                    outcome = "TIMEOUT"
+                    outcome_emoji = "⏰"
+                else:
+                    outcome = "DRAW"
+                    outcome_emoji = "⚪"
+            else:
+                outcome = "TIMEOUT"
+                outcome_emoji = "⏰"
+
+    return {
+        "outcome": outcome,
+        "outcome_emoji": outcome_emoji,
+        "player_health": player_health,
+        "opponent_health": opponent_health,
+        "process_reward": process_reward,
+        "outcome_reward": outcome_reward,
+        "combo_length": combo_length,
+        "win_rate": win_rate,
+        "episode_reward": episode_reward,
+        "step_count": step_count,
+    }
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate trained Samurai Showdown Agent - CUDA Version"
+        description="Evaluate PRIME-trained Samurai Showdown Agent"
     )
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_fighting_optimized/ppo_fighting_optimized_16950000_steps.zip",
-        help="Path to the trained CUDA model",
+        default="trained_models_simple_prime/ppo_simple_prime_final.zip",
+        help="Path to the trained PRIME model",
     )
     parser.add_argument(
         "--state-file",
@@ -138,25 +223,37 @@ def main():
         action="store_true",
         help="Force CPU evaluation even if CUDA is available",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Enable debug mode with extra information",
+    )
 
     args = parser.parse_args()
 
     # Check if model exists
     if not os.path.exists(args.model_path):
         print(f"❌ Error: Model file not found at {args.model_path}")
-        print("Available models:")
+        print("\n📁 Available models:")
 
-        # Check both CUDA and CPU model directories
-        for dir_name in [
+        # Check for model directories
+        model_dirs = [
+            "trained_models_simple_prime",
             "trained_models_samurai_cuda",
             "trained_models_samurai_cpu",
             "trained_models_samurai",
-        ]:
+            "trained_models",
+        ]
+
+        for dir_name in model_dirs:
             if os.path.exists(dir_name):
-                print(f"   {dir_name}/:")
+                print(f"   📂 {dir_name}/:")
                 for f in os.listdir(dir_name):
                     if f.endswith(".zip"):
-                        print(f"     - {f}")
+                        file_size = os.path.getsize(os.path.join(dir_name, f)) / (
+                            1024 * 1024
+                        )
+                        print(f"     🤖 {f} ({file_size:.1f} MB)")
         return
 
     game = "SamuraiShodown-Genesis"
@@ -164,37 +261,38 @@ def main():
     # Handle state file properly
     if args.use_default_state:
         state_file = None
-        print("Using default game state")
+        print("🎮 Using default game state")
     else:
         state_file = args.state_file
 
-    print(f"🚀 CUDA Model Evaluation")
-    print(f"🤖 Loading model from: {args.model_path}")
-    print(f"🎮 Using state file: {state_file if state_file else 'default'}")
-    print(f"🔄 Will run {args.episodes} episodes")
-    print(f"⚡ Running at {args.fps} FPS for smooth gameplay")
-    print(f"🎯 Deterministic actions: {'Yes' if args.deterministic else 'No'}")
-    print(f"✅ Full action space enabled (including jumps)")
-    print("\n🔧 Automatic observation format conversion enabled!")
-    print("\nPress Ctrl+C to quit at any time")
-    print("=" * 60)
+    print(f"🚀 PRIME MODEL EVALUATION")
+    print(f"🤖 Model: {args.model_path}")
+    print(f"🎮 State: {state_file if state_file else 'default'}")
+    print(f"🔄 Episodes: {args.episodes}")
+    print(f"⚡ FPS: {args.fps}")
+    print(f"🎯 Deterministic: {'Yes' if args.deterministic else 'No'}")
+    print(f"🔧 Debug mode: {'Yes' if args.debug else 'No'}")
+    print(f"🧠 PRIME methodology: Process + Outcome rewards")
+    print(f"🎨 Simple CNN architecture")
+    print("\n" + "=" * 60)
 
     # Create evaluation environment
+    print("\n🔧 Creating PRIME evaluation environment...")
     try:
         env = create_eval_env(game, state_file)
         print("✅ Environment created successfully!")
     except Exception as e:
         print(f"❌ Error creating environment: {e}")
         print("\n💡 Troubleshooting:")
-        print("   - Check if samurai.state file exists")
-        print("   - Try using --use-default-state flag")
-        print("   - Ensure SamuraiShodown-Genesis ROM is installed")
+        print("   • Check if samurai.state file exists")
+        print("   • Try using --use-default-state flag")
+        print("   • Ensure SamuraiShodown-Genesis ROM is installed")
+        print("   • Verify stable-retro is properly installed")
         return
 
     # Load the trained model with device selection
+    print("\n🧠 Loading PRIME model...")
     try:
-        print("🧠 Loading model...")
-
         # Determine device
         if args.force_cpu:
             device = "cpu"
@@ -206,6 +304,11 @@ def main():
                 if torch.cuda.is_available():
                     device = "cuda"
                     print("🚀 Using CUDA for evaluation")
+                    # Print CUDA info
+                    print(f"   GPU: {torch.cuda.get_device_name()}")
+                    print(
+                        f"   VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB"
+                    )
                 else:
                     device = "cpu"
                     print("💻 CUDA not available, using CPU")
@@ -216,71 +319,102 @@ def main():
         # Load model on selected device
         try:
             model = PPO.load(args.model_path, device=device)
-            print(f"✅ Model loaded on {device.upper()}!")
+            print(f"✅ PRIME model loaded on {device.upper()}!")
         except Exception as e:
             print(f"⚠️ Failed to load on {device}, trying CPU...")
             model = PPO.load(args.model_path, device="cpu")
             device = "cpu"
             print("✅ Model loaded on CPU!")
 
-        # Check observation space compatibility
-        model_shape = model.observation_space.shape
-        env_shape = env.observation_space.shape
+        # Validate model compatibility
+        is_compatible = validate_model_compatibility(model, env)
 
-        print(f"🔍 Model expects observation shape: {model_shape}")
-        print(f"🔍 Environment provides shape: {env_shape}")
+        if not is_compatible:
+            print("⚠️ Model and environment shapes don't match!")
+            print("   This may indicate a configuration mismatch.")
+            print("   Proceeding anyway, but expect potential issues...")
 
-        if model_shape != env_shape:
-            print("🔧 Observation shapes differ - will auto-convert during evaluation")
-        else:
-            print("✅ Observation shapes match perfectly!")
+        # Test model prediction
+        if not test_model_prediction(model, env):
+            print("❌ Model prediction test failed!")
+            print("   Cannot proceed with evaluation.")
+            return
 
     except Exception as e:
         print(f"❌ Error loading model: {e}")
         print("\n💡 Common issues:")
-        print("   - Model was trained with different wrapper settings")
-        print("   - GPU/CPU compatibility issues")
-        print("   - Model file is corrupted")
-        print("   - Try using --force-cpu flag")
+        print("   • Model trained with different wrapper settings")
+        print("   • GPU/CPU compatibility issues")
+        print("   • Model file is corrupted")
+        print("   • Try using --force-cpu flag")
+        import traceback
+
+        traceback.print_exc()
         return
 
     # Calculate frame timing
     frame_time = 1.0 / args.fps
 
+    print(f"\n🎬 Starting PRIME evaluation...")
+    print("   Press Ctrl+C to quit at any time")
+    print("   Watch the game window for AI gameplay!")
+
+    # Get initial wrapper stats
     try:
+        initial_stats = env.current_stats.copy()
+        initial_wins = initial_stats.get("wins", 0)
+        initial_losses = initial_stats.get("losses", 0)
+        print(f"   📊 Initial wrapper stats: {initial_wins}W/{initial_losses}L")
+    except:
+        initial_wins = 0
+        initial_losses = 0
+        print("   📊 Could not read initial wrapper stats")
+
+    try:
+        # Statistics tracking
         total_wins = 0
         total_losses = 0
+        total_draws = 0
+        total_timeouts = 0
         total_episodes = 0
         total_reward = 0
         total_steps = 0
+        total_process_reward = 0
+        total_outcome_reward = 0
 
-        # Track action usage
+        # Action tracking
         action_counts = {}
+        all_episode_stats = []
 
         for episode in range(args.episodes):
-            print(f"\n⚔️  --- Episode {episode + 1}/{args.episodes} ---")
+            print(f"\n⚔️ === Episode {episode + 1}/{args.episodes} ===")
 
+            # Reset environment
             obs, info = env.reset()
             episode_reward = 0
+            episode_process_reward = 0
+            episode_outcome_reward = 0
             step_count = 0
             episode_start_time = time.time()
             episode_actions = []
 
-            print("🎬 Starting new match... Watch the game window!")
-            print("🎮 AI can now use full action space (including jumps)!")
+            if args.debug:
+                print(f"🔍 Reset obs shape: {obs.shape}")
+                print(f"🔍 Reset obs type: {obs.dtype}")
+
+            print("🎬 Match starting... Watch the AI play!")
 
             while True:
                 step_start_time = time.time()
 
-                # Convert observation format if needed
-                obs_for_model = convert_observation_format(
-                    obs, model.observation_space.shape
-                )
-
                 # Get action from the trained model
-                action, _states = model.predict(
-                    obs_for_model, deterministic=args.deterministic
-                )
+                try:
+                    action, _states = model.predict(
+                        obs, deterministic=args.deterministic
+                    )
+                except Exception as e:
+                    print(f"❌ Prediction error: {e}")
+                    break
 
                 # Track action usage
                 action_key = str(action) if hasattr(action, "__iter__") else int(action)
@@ -288,120 +422,240 @@ def main():
                 episode_actions.append(action_key)
 
                 # Take step in environment
-                obs, reward, terminated, truncated, info = env.step(action)
+                try:
+                    obs, reward, terminated, truncated, info = env.step(action)
+                except Exception as e:
+                    print(f"❌ Environment step error: {e}")
+                    break
 
+                # Track rewards
                 episode_reward += reward
                 step_count += 1
+
+                # Track PRIME-specific rewards
+                process_reward = info.get("process_reward", 0)
+                outcome_reward = info.get("outcome_reward", 0)
+                episode_process_reward += process_reward
+                episode_outcome_reward += outcome_reward
 
                 # Frame rate limiting
                 elapsed = time.time() - step_start_time
                 if elapsed < frame_time:
                     time.sleep(frame_time - elapsed)
 
+                # Debug output
+                if args.debug and step_count % (args.fps * 10) == 0:  # Every 10 seconds
+                    game_info = info.get("game_info", {})
+                    player_hp = game_info.get("player_health", "?")
+                    enemy_hp = game_info.get("opponent_health", "?")
+                    combo = info.get("combo_length", 0)
+                    print(
+                        f"   🔍 Step {step_count}: HP {player_hp}vs{enemy_hp}, Combo: {combo}"
+                    )
+
                 # Check if episode is done
                 if terminated or truncated:
                     break
 
-                # Optional: Add some info display every 5 seconds
-                if step_count % (args.fps * 5) == 0:  # Every 5 seconds
-                    player_hp = info.get("health", "?")
-                    enemy_hp = info.get("enemy_health", "?")
-                    print(
-                        f"   Step {step_count}: Player HP: {player_hp}, Enemy HP: {enemy_hp}"
-                    )
-
-            # Episode finished
+            # Episode finished - analyze performance
             episode_time = time.time() - episode_start_time
+
+            # Get the final outcome reward for proper win/loss detection
+            final_outcome_reward = info.get("outcome_reward", 0)
+
+            performance = analyze_episode_performance(
+                info, episode_reward, step_count, final_outcome_reward
+            )
+
+            # Update statistics
             total_episodes += 1
             total_reward += episode_reward
             total_steps += step_count
+            total_process_reward += episode_process_reward
+            total_outcome_reward += episode_outcome_reward
 
-            print(f"🏁 Episode {episode + 1} finished!")
-            print(f"   Total reward: {episode_reward:.1f}")
-            print(f"   Steps taken: {step_count}")
-            print(f"   Episode duration: {episode_time:.1f}s")
-
-            # Get final health values
-            player_hp = info.get("health", 0)
-            enemy_hp = info.get("enemy_health", 0)
-            print(f"   Final - Player HP: {player_hp}, Enemy HP: {enemy_hp}")
-
-            # Determine winner
-            if player_hp <= 0 and enemy_hp > 0:
-                print("   🔴 AI Lost this round")
-                total_losses += 1
-            elif enemy_hp <= 0 and player_hp > 0:
-                print("   🟢 AI Won this round")
+            # Count outcomes
+            if performance["outcome"] == "WIN":
                 total_wins += 1
+            elif performance["outcome"] == "LOSS":
+                total_losses += 1
+            elif performance["outcome"] == "DRAW":
+                total_draws += 1
             else:
-                print("   ⚪ Round ended without clear winner")
+                total_timeouts += 1
 
-            # Show action diversity for this episode
+            # Store episode stats
+            all_episode_stats.append(performance)
+
+            # Print episode summary
+            print(f"\n🏁 Episode {episode + 1} Complete!")
+            print(
+                f"   {performance['outcome_emoji']} Outcome: {performance['outcome']}"
+            )
+            print(
+                f"   🏥 Final HP: Player {performance['player_health']}, Enemy {performance['opponent_health']}"
+            )
+            print(f"   🎯 Total Reward: {episode_reward:.1f}")
+            print(f"   🔄 Process Reward: {episode_process_reward:.1f}")
+            print(f"   🎖️ Outcome Reward: {final_outcome_reward:.1f}")
+            print(f"   🥊 Max Combo: {performance['combo_length']}")
+            print(f"   ⏱️ Duration: {episode_time:.1f}s ({step_count} steps)")
+
+            # Debug outcome detection
+            if args.debug:
+                print(f"   🔍 Debug - Outcome detection:")
+                print(f"       Outcome reward: {final_outcome_reward}")
+                print(
+                    f"       Health comparison: {performance['player_health']} vs {performance['opponent_health']}"
+                )
+                print(f"       Final classification: {performance['outcome']}")
+
+            # Action diversity
             unique_actions = len(set(episode_actions))
-            print(f"   🎮 Action diversity: {unique_actions} unique actions used")
+            print(f"   🎮 Action Diversity: {unique_actions} unique actions")
 
             # Pause between episodes
             if episode < args.episodes - 1:
                 print("\n⏳ Waiting 3 seconds before next episode...")
                 time.sleep(3)
 
-        # Final statistics
-        print(f"\n📊 Final Results:")
-        print(f"   Episodes: {total_episodes}")
-        print(f"   Wins: {total_wins}")
-        print(f"   Losses: {total_losses}")
-        print(f"   Draws/Timeouts: {total_episodes - total_wins - total_losses}")
-        if total_episodes > 0:
-            win_rate = (total_wins / total_episodes) * 100
-            print(f"   Win Rate: {win_rate:.1f}%")
-            avg_reward = total_reward / total_episodes
-            avg_steps = total_steps / total_episodes
-            print(f"   Average Reward: {avg_reward:.1f}")
-            print(f"   Average Steps: {avg_steps:.0f}")
+        # Calculate final statistics
+        print(f"\n" + "=" * 60)
+        print(f"📊 PRIME EVALUATION RESULTS")
+        print(f"=" * 60)
+
+        # Get final wrapper stats for comparison
+        try:
+            final_stats = env.current_stats.copy()
+            final_wins = final_stats.get("wins", 0)
+            final_losses = final_stats.get("losses", 0)
+            wrapper_wins = final_wins - initial_wins
+            wrapper_losses = final_losses - initial_losses
+
+            print(f"🎯 WRAPPER STATS (Most Accurate):")
+            print(f"   Wins during evaluation: {wrapper_wins}")
+            print(f"   Losses during evaluation: {wrapper_losses}")
+            if wrapper_wins + wrapper_losses > 0:
+                wrapper_win_rate = (
+                    wrapper_wins / (wrapper_wins + wrapper_losses)
+                ) * 100
+                print(f"   Wrapper Win Rate: {wrapper_win_rate:.1f}%")
+            print(f"   Total wrapper stats: {final_wins}W/{final_losses}L")
+        except:
+            print(f"🎯 Could not read wrapper stats")
+            wrapper_wins = None
+            wrapper_losses = None
+
+        # Outcome statistics from our detection
+        print(f"\n🏆 Our Detection Results:")
+        print(f"   Wins: {total_wins} ({total_wins/total_episodes*100:.1f}%)")
+        print(f"   Losses: {total_losses} ({total_losses/total_episodes*100:.1f}%)")
+        print(f"   Draws: {total_draws} ({total_draws/total_episodes*100:.1f}%)")
+        print(
+            f"   Timeouts: {total_timeouts} ({total_timeouts/total_episodes*100:.1f}%)"
+        )
+
+        # Additional debugging for outcome detection
+        if args.debug:
+            print(f"\n🔍 Debug - Outcome Details:")
+            for i, stats in enumerate(all_episode_stats):
+                print(
+                    f"   Episode {i+1}: {stats['outcome']} (OR: {stats['outcome_reward']:.1f})"
+                )
+
+        # Performance metrics
+        win_rate = (total_wins / total_episodes) * 100
+        avg_reward = total_reward / total_episodes
+        avg_steps = total_steps / total_episodes
+        avg_process_reward = total_process_reward / total_episodes
+        avg_outcome_reward = total_outcome_reward / total_episodes
+
+        print(f"\n📈 Performance Metrics:")
+        print(f"   Win Rate: {win_rate:.1f}%")
+        print(f"   Average Reward: {avg_reward:.1f}")
+        print(f"   Average Process Reward: {avg_process_reward:.1f}")
+        print(f"   Average Outcome Reward: {avg_outcome_reward:.1f}")
+        print(f"   Average Episode Length: {avg_steps:.0f} steps")
 
         # Action analysis
-        print(f"\n🎮 Action Usage Analysis:")
-        print(f"   Total unique actions used: {len(action_counts)}")
-        print(f"   Total actions taken: {sum(action_counts.values())}")
+        print(f"\n🎮 Action Analysis:")
+        print(f"   Total Actions: {sum(action_counts.values()):,}")
+        print(f"   Unique Actions Used: {len(action_counts)}")
 
-        # Show top 5 most used actions
-        sorted_actions = sorted(action_counts.items(), key=lambda x: x[1], reverse=True)
-        print(f"   Top 5 most used actions:")
-        for i, (action, count) in enumerate(sorted_actions[:5]):
-            percentage = (count / sum(action_counts.values())) * 100
-            print(f"     {i+1}. Action {action}: {count} times ({percentage:.1f}%)")
+        # Top actions
+        if action_counts:
+            sorted_actions = sorted(
+                action_counts.items(), key=lambda x: x[1], reverse=True
+            )
+            print(f"   Top 5 Actions:")
+            for i, (action, count) in enumerate(sorted_actions[:5]):
+                percentage = (count / sum(action_counts.values())) * 100
+                print(
+                    f"     {i+1}. Action {action}: {count:,} times ({percentage:.1f}%)"
+                )
 
-        # Performance assessment
-        if total_episodes > 0:
-            if win_rate >= 70:
-                print("🏆 Excellent performance!")
-            elif win_rate >= 50:
-                print("👍 Good performance!")
-            elif win_rate >= 30:
-                print("📈 Improving performance!")
-            else:
-                print("🔧 Needs more training!")
+        # Performance assessment using the most accurate data
+        actual_wins = wrapper_wins if wrapper_wins is not None else total_wins
+        actual_total = (
+            (wrapper_wins + wrapper_losses)
+            if (wrapper_wins is not None and wrapper_losses is not None)
+            else total_episodes
+        )
+        actual_win_rate = (actual_wins / actual_total * 100) if actual_total > 0 else 0
 
-        # Training assessment
-        print(f"\n🧠 Training Assessment:")
-        if len(action_counts) >= 8:
-            print("✅ Good action diversity - AI learned to use multiple moves")
-        elif len(action_counts) >= 5:
-            print("👍 Moderate action diversity - AI uses several moves")
+        print(
+            f"\n🎯 PRIME Assessment (Using {'Wrapper' if wrapper_wins is not None else 'Detection'} Stats):"
+        )
+        print(f"   Actual Win Rate: {actual_win_rate:.1f}%")
+
+        if actual_win_rate >= 80:
+            print("🏆 EXCELLENT! Outstanding PRIME performance!")
+        elif actual_win_rate >= 65:
+            print("🥇 GREAT! Strong PRIME training results!")
+        elif actual_win_rate >= 50:
+            print("👍 GOOD! Solid PRIME performance!")
+        elif actual_win_rate >= 35:
+            print("📈 IMPROVING! PRIME showing progress!")
         else:
-            print("⚠️ Limited action diversity - AI might need more training")
+            print("🔧 TRAINING NEEDED! Requires more PRIME optimization!")
+
+        # Action diversity assessment
+        action_diversity = len(action_counts)
+        if action_diversity >= 12:
+            print("✅ Excellent action diversity - AI mastered complex moves!")
+        elif action_diversity >= 8:
+            print("👍 Good action diversity - AI uses varied strategies!")
+        elif action_diversity >= 5:
+            print("📊 Moderate action diversity - AI learned basic combinations!")
+        else:
+            print("⚠️ Limited action diversity - Consider longer training!")
+
+        # PRIME-specific insights
+        process_vs_outcome = avg_process_reward / (avg_outcome_reward + 1e-6)
+        print(f"\n🧠 PRIME Insights:")
+        print(f"   Process/Outcome Ratio: {process_vs_outcome:.2f}")
+        if process_vs_outcome > 2.0:
+            print(
+                "   ✅ Strong process learning - AI mastered step-by-step improvements!"
+            )
+        elif process_vs_outcome > 1.0:
+            print("   👍 Balanced learning - Good mix of process and outcome rewards!")
+        else:
+            print("   📊 Outcome-focused - AI learned to win but may lack finesse!")
 
     except KeyboardInterrupt:
-        print("\n\n⏹️  Evaluation interrupted by user")
+        print("\n\n⏹️ Evaluation interrupted by user")
     except Exception as e:
         print(f"\n❌ Error during evaluation: {e}")
-        print("💡 Check that your model and wrapper configurations are compatible")
-        import traceback
+        print("💡 Check that your model and wrapper configurations match training!")
+        if args.debug:
+            import traceback
 
-        traceback.print_exc()
+            traceback.print_exc()
     finally:
         env.close()
-        print("\n✅ Evaluation complete!")
+        print("\n✅ PRIME evaluation complete!")
+        print("🎮 Thanks for using the PRIME evaluation system!")
 
 
 if __name__ == "__main__":
