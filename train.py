@@ -92,6 +92,8 @@ class PRIMETrainingCallback(BaseCallback):
         self.process_rewards_history = deque(maxlen=1000)
         self.outcome_rewards_history = deque(maxlen=1000)
 
+        self.entropy_adjustments = 0
+
     # Replace the existing entropy management section in your PRIMETrainingCallback._on_step() method:
 
     def _on_step(self) -> bool:
