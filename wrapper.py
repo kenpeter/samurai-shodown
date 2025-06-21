@@ -86,8 +86,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # Reward normalization parameters
         self.reward_scale = 10.0  # Scale factor for gradients
-        self.outcome_weight = 0.3  # 30% outcome, 70% process (PRIME recommendation)
-        self.process_weight = 0.7
+        self.outcome_weight = 0.1
+        self.process_weight = 0.9
 
         # Frame buffer for stacking - 4 FRAMES
         self.frame_buffer = deque(maxlen=self.frame_stack)
@@ -408,7 +408,7 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
         # Get game information
         game_info = self._extract_game_state(info)
 
-        # ok we have process reward here
+        # process reward + outcome reward
         process_reward = self._calculate_process_reward(game_info, action, info)
         outcome_reward = self._calculate_outcome_reward(game_info, info)
 

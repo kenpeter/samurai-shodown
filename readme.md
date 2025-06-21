@@ -4,13 +4,14 @@
 
 
 
-python train.py --resume ttrained_models_simple_prime/ppo_simple_prime_4575000_steps.zip --render --total-timesteps 4000000 --batch-size 3072 --n-steps 3072  --learning-rate 3e-4
+python train.py --resume ttrained_models_simple_prime/ppo_simple_prime_4575000_steps.zip --render --total-timesteps 4000000 --batch-size 3072 --n-steps 3072  --learning-rate 4e-4
 
 
 
 
 
-python train.py --batch-size 3072 --n-steps 3072  --render --total-timesteps 100000000 
+python train.py --batch-size 3072 --n-steps 2048  --render --total-timesteps 10000000 --learning-rate 4e-4
+
 
 
 
