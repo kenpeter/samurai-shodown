@@ -12,6 +12,10 @@ python train.py --resume ttrained_models_simple_prime/ppo_simple_prime_4575000_s
 python train.py --batch-size 3072 --ent-coef 0.9 --n-steps 512 --total-timesteps 1000000 --render
 
 
+python train.py --resume trained_models_simple_prime/ppo_simple_prime_975000_steps.zip --batch-size 3072 --ent-coef 0.8 --n-steps 512 --total-timesteps 1000000 --render
+
+
+
 python train.py --resume trained_models_simple_prime/ppo_simple_prime_final.zip --batch-size 3072 --ent-coef 0.7 --n-steps 1024 --total-timesteps 1000000 --render
 
 

@@ -10,21 +10,8 @@ import numpy as np
 import psutil
 from typing import Dict, Any, Optional, Type, Union
 from collections import deque
-
-# Use stable-retro for gymnasium compatibility
-try:
-    import stable_retro as retro
-
-    print("🎮 Using stable-retro (gymnasium compatible)")
-except ImportError:
-    try:
-        import retro
-
-        print("🎮 Using retro (legacy)")
-    except ImportError:
-        raise ImportError(
-            "Neither stable-retro nor retro found. Install with: pip install stable-retro"
-        )
+from clip_cov_ppo import ClipCovPPO
+import retro
 
 import gymnasium as gym
 from stable_baselines3 import PPO
@@ -178,7 +165,7 @@ def create_simple_prime_model(
     env, device, args, feature_extractor_class, features_dim, net_arch
 ):
     """
-    Create simple PRIME model for large batch + long trajectory training
+    Create simple PRIME model with Clip-Cov for large batch + long trajectory training
     """
 
     # Initialize simple PRM model
@@ -191,8 +178,8 @@ def create_simple_prime_model(
     # Learning rate schedule for large batches
     lr_schedule = lambda progress: args.learning_rate * (1 - 0.8 * progress)
 
-    # Optimized for LARGE batch + LONG trajectory
-    model = PPO(
+    # CLIP-COV MODIFICATION: Use ClipCovPPO instead of PPO
+    model = ClipCovPPO(
         "CnnPolicy",
         env,
         device=device,
@@ -208,6 +195,10 @@ def create_simple_prime_model(
         max_grad_norm=0.5,
         gae_lambda=0.95,
         tensorboard_log=None,
+        # CLIP-COV PARAMETERS
+        clip_cov_ratio=2e-4,  # 0.02% of tokens
+        cov_threshold_low=1.0,
+        cov_threshold_high=5.0,
         policy_kwargs=dict(
             features_extractor_class=feature_extractor_class,
             features_extractor_kwargs=dict(features_dim=features_dim),
@@ -219,10 +210,12 @@ def create_simple_prime_model(
         ),
     )
 
-    print(f"🧠 SIMPLE PRIME Model Created:")
+    print(f"🧠 SIMPLE PRIME Model with CLIP-COV Created:")
     print(f"   📊 Batch size: {args.batch_size:,}")
     print(f"   📏 N_steps: {args.n_steps:,}")
     print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
+    print(f"   🎯 Clip-Cov ratio: {2e-4:.1e}")
+    print(f"   🚫 Prevents entropy collapse!")
     print(f"   🎓 Epochs: 2")
     print(f"   🚀 Simple CNN for maximum efficiency")
     print(f"   💾 Memory optimized for large scale training")
@@ -248,6 +241,26 @@ def main():
     )
     parser.add_argument("--batch-size", type=int, default=2048, help="Batch size")
     parser.add_argument("--mixed-precision", action="store_true")
+
+    # CLIP-COV PARAMETERS
+    parser.add_argument(
+        "--clip-cov-ratio",
+        type=float,
+        default=2e-4,
+        help="Fraction of high-covariance tokens to clip",
+    )
+    parser.add_argument(
+        "--cov-threshold-low",
+        type=float,
+        default=1.0,
+        help="Lower bound for covariance threshold",
+    )
+    parser.add_argument(
+        "--cov-threshold-high",
+        type=float,
+        default=5.0,
+        help="Upper bound for covariance threshold",
+    )
 
     args = parser.parse_args()
 

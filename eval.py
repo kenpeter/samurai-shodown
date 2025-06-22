@@ -187,7 +187,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_simple_prime/ppo_simple_prime_final.zip",
+        default="trained_models_simple_prime/ppo_simple_prime_975000_steps.zip",
         help="Path to the trained PRIME model",
     )
     parser.add_argument(
