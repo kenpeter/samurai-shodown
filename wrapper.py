@@ -86,8 +86,8 @@ class SamuraiShowdownCustomWrapper(gym.Wrapper):
 
         # Reward normalization parameters
         self.reward_scale = 10.0  # Scale factor for gradients
-        self.outcome_weight = 0.1
-        self.process_weight = 0.9
+        self.outcome_weight = 0.3
+        self.process_weight = 0.7
 
         # Frame buffer for stacking - 4 FRAMES
         self.frame_buffer = deque(maxlen=self.frame_stack)
