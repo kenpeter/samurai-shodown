@@ -2,8 +2,7 @@ day 1,2
 python train.py --styles aggressive --total-timesteps 150000 --ent-coef 0.10 --learning-rate 5e-4 --n-steps 512 --batch-size 256 --render
 
 day 3,4
-python train.py --styles aggressive --total-timesteps 150000 --ent-coef 0.10 --learning-rate 5e-4 --n-steps 512 --batch-size 256 --render
-
+python train.py --styles balanced --total-timesteps 150000 --ent-coef 0.08 --learning-rate 4e-4 --n-steps 768 --batch-size 384 --render
 
 day 5, 7
 # Continue aggressive agent with better hyperparameters
@@ -20,7 +19,7 @@ python train.py --styles defensive --total-timesteps 150000 --ent-coef 0.06 --le
 
 
 day10-12
-# Resume aggressive with breakthrough parameters
+# Resume aggressive with breakthrough parameters*
 python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 200000 --ent-coef 0.08 --learning-rate 3.5e-4 --n-steps 1536 --batch-size 768 --render
 
 # Resume balanced with breakthrough parameters  
