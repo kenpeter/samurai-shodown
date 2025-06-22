@@ -1,61 +1,112 @@
-# Day 1-2: Quick Start
+day 1,2
 python train.py --styles aggressive --total-timesteps 150000 --ent-coef 0.10 --learning-rate 5e-4 --n-steps 512 --batch-size 256 --render
 
-# Day 3-4: Balanced Learning  
-python train.py --styles balanced --total-timesteps 150000 --ent-coef 0.08 --learning-rate 4e-4 --n-steps 768 --batch-size 384
-
-# Day 5-7: Foundation Complete
-python train.py --styles aggressive balanced --total-timesteps 200000 --ent-coef 0.07 --learning-rate 3e-4 --n-steps 1024 --batch-size 512 --sequential
+day 3,4
+python train.py --styles aggressive --total-timesteps 150000 --ent-coef 0.10 --learning-rate 5e-4 --n-steps 512 --batch-size 256 --render
 
 
+day 5, 7
+# Continue aggressive agent with better hyperparameters
+python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 100000 --ent-coef 0.07 --learning-rate 3e-4 --n-steps 1024 --batch-size 512 --render
 
-
-
-week2
-
-# Day 8-9: Multi-Agent Introduction
-python train.py --styles aggressive balanced defensive --total-timesteps 150000 --ent-coef 0.06 --learning-rate 3e-4 --n-steps 1024 --batch-size 512 --sequential
-
-# Day 10-12: Breakthrough Push (Resume from Week 1)
-python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 200000 --ent-coef 0.08 --learning-rate 3.5e-4 --n-steps 1536 --batch-size 768
-
-python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 200000 --ent-coef 0.06 --learning-rate 3e-4 --n-steps 1536 --batch-size 768
-
-# Day 13-14: Cross-Style Mastery
-python train.py --styles aggressive balanced defensive --total-timesteps 150000 --ent-coef 0.05 --learning-rate 2.5e-4 --n-steps 1536 --batch-size 1024 --sequential
+# Continue balanced agent (can now fight aggressive agents!)
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 100000 --ent-coef 0.07 --learning-rate 3e-4 --n-steps 1024 --batch-size 512 --render
 
 
 
-week3
+day8,9
+# Create defensive agent (can fight aggressive + balanced from Week 1)
+python train.py --styles defensive --total-timesteps 150000 --ent-coef 0.06 --learning-rate 3e-4 --n-steps 1024 --batch-size 512 --render
 
 
-# Day 15-16: Large Batch Stability
-python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 150000 --ent-coef 0.05 --learning-rate 2.5e-4 --n-steps 2048 --batch-size 1024
+day10-12
+# Resume aggressive with breakthrough parameters
+python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 200000 --ent-coef 0.08 --learning-rate 3.5e-4 --n-steps 1536 --batch-size 768 --render
 
-python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 150000 --ent-coef 0.04 --learning-rate 2e-4 --n-steps 2048 --batch-size 1024
+# Resume balanced with breakthrough parameters  
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 200000 --ent-coef 0.06 --learning-rate 3e-4 --n-steps 1536 --batch-size 768 --render
 
-# Day 17-19: Advanced Multi-Agent
-python train.py --styles aggressive balanced defensive --total-timesteps 200000 --ent-coef 0.04 --learning-rate 2e-4 --n-steps 2048 --batch-size 1536 --sequential
-
-# Day 20-21: Tactical Refinement
-python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 150000 --ent-coef 0.03 --learning-rate 1.5e-4 --n-steps 2048 --batch-size 1536
-
+# Resume defensive with breakthrough parameters
+python train.py --resume ncsoft_breakthrough_models/defensive_final.zip --styles defensive --total-timesteps 200000 --ent-coef 0.05 --learning-rate 2.8e-4 --n-steps 1536 --batch-size 768 --render
 
 
-week4
 
-# Day 22-24: Fine-Tuning
+
+
+day13,14
+# Resume aggressive for cross-style mastery
+python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 75000 --ent-coef 0.05 --learning-rate 2.5e-4 --n-steps 1536 --batch-size 1024 --render
+
+# Resume balanced for cross-style mastery
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 75000 --ent-coef 0.05 --learning-rate 2.5e-4 --n-steps 1536 --batch-size 1024 --render
+
+# Resume defensive for cross-style mastery
+python train.py --resume ncsoft_breakthrough_models/defensive_final.zip --styles defensive --total-timesteps 75000 --ent-coef 0.04 --learning-rate 2.3e-4 --n-steps 1536 --batch-size 1024 --render
+
+
+
+
+day15,16
+# Resume aggressive with large batch training
+python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 150000 --ent-coef 0.05 --learning-rate 2.5e-4 --n-steps 2048 --batch-size 1024 --render
+
+# Resume balanced with large batch training
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 150000 --ent-coef 0.04 --learning-rate 2e-4 --n-steps 2048 --batch-size 1024 --render
+
+# Resume defensive with large batch training
+python train.py --resume ncsoft_breakthrough_models/defensive_final.zip --styles defensive --total-timesteps 150000 --ent-coef 0.035 --learning-rate 1.8e-4 --n-steps 2048 --batch-size 1024 --render
+
+
+
+day17,19
+# Resume aggressive for advanced multi-agent
+python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 67000 --ent-coef 0.04 --learning-rate 2e-4 --n-steps 2048 --batch-size 1536 --render
+
+# Resume balanced for advanced multi-agent
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 67000 --ent-coef 0.04 --learning-rate 2e-4 --n-steps 2048 --batch-size 1536 --render
+
+# Resume defensive for advanced multi-agent
+python train.py --resume ncsoft_breakthrough_models/defensive_final.zip --styles defensive --total-timesteps 66000 --ent-coef 0.035 --learning-rate 1.8e-4 --n-steps 2048 --batch-size 1536 --render
+
+
+
+day20,21
+# Resume balanced for tactical refinement (usually best performer)
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 150000 --ent-coef 0.03 --learning-rate 1.5e-4 --n-steps 2048 --batch-size 1536 --render
+
+
+
+
+day 22,24
+# Resume aggressive for fine-tuning
 python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 150000 --ent-coef 0.03 --learning-rate 1.5e-4 --n-steps 2048 --batch-size 2048
 
+# Resume balanced for fine-tuning
 python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 150000 --ent-coef 0.025 --learning-rate 1e-4 --n-steps 2048 --batch-size 2048
 
-# Day 25-26: Professional Level
-python train.py --styles aggressive balanced defensive --total-timesteps 150000 --ent-coef 0.02 --learning-rate 1e-4 --n-steps 2048 --batch-size 2048 --sequential
+# Resume defensive for fine-tuning
+python train.py --resume ncsoft_breakthrough_models/defensive_final.zip --styles defensive --total-timesteps 150000 --ent-coef 0.02 --learning-rate 1.2e-4 --n-steps 2048 --batch-size 2048
 
-# Day 27-28: Final Polish
+
+
+25,26
+# Resume aggressive for professional level
+python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 50000 --ent-coef 0.02 --learning-rate 1e-4 --n-steps 2048 --batch-size 2048
+
+# Resume balanced for professional level
+python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 50000 --ent-coef 0.02 --learning-rate 1e-4 --n-steps 2048 --batch-size 2048
+
+# Resume defensive for professional level  
+python train.py --resume ncsoft_breakthrough_models/defensive_final.zip --styles defensive --total-timesteps 50000 --ent-coef 0.018 --learning-rate 9e-5 --n-steps 2048 --batch-size 2048
+
+
+
+27,28
+# Resume best performing agent for final polish (check win rates to determine)
 python train.py --resume ncsoft_breakthrough_models/balanced_final.zip --styles balanced --total-timesteps 200000 --ent-coef 0.02 --learning-rate 8e-5 --n-steps 2048 --batch-size 2048
 
-
+# Alternatively, if aggressive is performing better:
+# python train.py --resume ncsoft_breakthrough_models/aggressive_final.zip --styles aggressive --total-timesteps 200000 --ent-coef 0.02 --learning-rate 8e-5 --n-steps 2048 --batch-size 2048
 
 
 
