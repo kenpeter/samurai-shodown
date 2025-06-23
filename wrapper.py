@@ -306,6 +306,21 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         # Health constants
         self.full_hp = 128
 
+        # Initialize current_stats FIRST before any other code that might reference it
+        self.current_stats = {
+            "wins": 0,
+            "losses": 0,
+            "total_rounds": 0,
+            "win_rate": 0.0,
+            "current_episode_reward": 0.0,
+            "best_win_streak": 0,
+            "current_win_streak": 0,
+            "avg_episode_length": 0.0,
+            "total_damage_dealt": 0,
+            "total_damage_taken": 0,
+            "damage_efficiency": 0.0,
+        }
+
         # JEPA-specific components
         if self.enable_jepa:
             # Initialize JEPA modules (will be properly initialized after feature extractor is available)
@@ -743,12 +758,41 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             game_info, action, info, visual_features
         )
 
-        # Episode termination logic
+        # Episode termination logic with win/loss tracking
+        round_ended = False
+        player_health = game_info["player_health"]
+        opponent_health = game_info["opponent_health"]
+
+        # Check for round/match completion and update win/loss stats
+        if player_health <= 0 or opponent_health <= 0:
+            round_ended = True
+            self.current_stats["total_rounds"] += 1
+
+            if player_health > opponent_health:
+                # Player wins
+                self.current_stats["wins"] += 1
+                self.current_stats["current_win_streak"] += 1
+                self.current_stats["best_win_streak"] = max(
+                    self.current_stats["best_win_streak"],
+                    self.current_stats["current_win_streak"],
+                )
+            elif opponent_health > player_health:
+                # Player loses
+                self.current_stats["losses"] += 1
+                self.current_stats["current_win_streak"] = 0
+            # else: draw (no change to win/loss)
+
+            # Update win rate
+            if self.current_stats["total_rounds"] > 0:
+                self.current_stats["win_rate"] = (
+                    self.current_stats["wins"] / self.current_stats["total_rounds"]
+                )
+
         done = (
             self.step_count >= self.max_episode_steps
             or terminated
             or truncated
-            or (game_info["player_health"] <= 0 and game_info["opponent_health"] <= 0)
+            or round_ended
         )
 
         # Get stacked observation
@@ -762,6 +806,8 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 "enhanced_reward": enhanced_reward,
                 "jepa_enabled": self.enable_jepa,
                 "strategic_stats": self.strategic_stats.copy(),
+                "current_stats": self.current_stats.copy(),
+                "round_ended": round_ended,
             }
         )
 

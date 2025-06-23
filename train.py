@@ -238,18 +238,15 @@ class JEPAPRIMETrainingCallback(BaseCallback):
             # Get enhanced training stats
             if hasattr(self.training_env, "get_attr"):
                 try:
-                    # Try to get environment stats safely
-                    env_attrs = self.training_env.get_attr("current_stats")
-                    env_stats = env_attrs[0] if env_attrs and len(env_attrs) > 0 else {}
+                    # Get environment wrapper attributes directly
+                    envs = self.training_env.get_attr("current_stats")
+                    env_stats = envs[0] if envs and len(envs) > 0 else {}
 
-                    strategic_attrs = (
-                        self.training_env.get_attr("strategic_stats")
-                        if hasattr(self.training_env, "get_attr")
-                        else [{}]
-                    )
+                    # Get strategic stats
+                    strategic_envs = self.training_env.get_attr("strategic_stats")
                     strategic_stats = (
-                        strategic_attrs[0]
-                        if strategic_attrs and len(strategic_attrs) > 0
+                        strategic_envs[0]
+                        if strategic_envs and len(strategic_envs) > 0
                         else {}
                     )
 
@@ -257,9 +254,10 @@ class JEPAPRIMETrainingCallback(BaseCallback):
                     win_rate = env_stats.get("win_rate", 0) * 100 if env_stats else 0
                     wins = env_stats.get("wins", 0) if env_stats else 0
                     losses = env_stats.get("losses", 0) if env_stats else 0
+                    total_rounds = env_stats.get("total_rounds", 0) if env_stats else 0
 
-                    print(f"   🎯 Win Rate: {win_rate:.1f}%")
-                    print(f"   🏆 Record: {wins}W/{losses}L")
+                    print(f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W/{losses}L)")
+                    print(f"   🎮 Total Rounds: {total_rounds}")
 
                     # JEPA-specific stats
                     if self.enable_jepa and strategic_stats:
@@ -268,9 +266,6 @@ class JEPAPRIMETrainingCallback(BaseCallback):
                         )
                         movement_accuracy = (
                             strategic_stats.get("movement_prediction_accuracy", 0) * 100
-                        )
-                        response_effectiveness = (
-                            strategic_stats.get("response_effectiveness", 0) * 100
                         )
                         successful_responses = strategic_stats.get(
                             "successful_responses", 0
@@ -281,9 +276,6 @@ class JEPAPRIMETrainingCallback(BaseCallback):
                         print(f"   🎭 Movement accuracy: {movement_accuracy:.1f}%")
                         print(
                             f"   ⚔️ Response success: {successful_responses}/{total_responses}"
-                        )
-                        print(
-                            f"   🎯 Response effectiveness: {response_effectiveness:.1f}%"
                         )
 
                         # Update JEPA metrics
@@ -303,12 +295,24 @@ class JEPAPRIMETrainingCallback(BaseCallback):
 
                     if self.enable_jepa:
                         print(f"   🧠 JEPA + PRIME + Enhanced CNN")
-                        print(f"   🎮 Strategic AI with opponent prediction")
+                        print(f"   🎮 Strategic AI with 6-frame prediction")
                     else:
                         print(f"   🧠 PRIME + Enhanced CNN")
 
                 except Exception as e:
-                    print(f"   ⚠️ Stats collection error: {e}")
+                    # Simplified fallback stats
+                    print(f"   🎯 Win Rate: Learning... (early training)")
+                    print(f"   🏆 Record: Rounds in progress")
+                    print(f"   🎛️ Entropy coefficient: {self.model.ent_coef:.4f}")
+                    print(f"   📏 N_steps: {self.model.n_steps}")
+                    if self.enable_jepa:
+                        print(f"   🧠 JEPA + PRIME + Enhanced CNN")
+                        print(f"   🔮 6-frame strategic prediction")
+                    else:
+                        print(f"   🧠 PRIME + Enhanced CNN")
+                        print(
+                            f"   📝 Note: Win rate tracking starts after first completed rounds"
+                        )
 
             # Learning rate and entropy adaptation suggestions
             if self.num_timesteps > 50000:
