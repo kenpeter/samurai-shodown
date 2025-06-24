@@ -1,5 +1,5 @@
 # 1.1 Initial Exploration - Learn basic patterns
-python train.py --ent-coef 0.8 --n-steps 512 --batch-size 2048 --total-timesteps 500000 --learning-rate 3e-4 --render
+python train.py --ent-coef 0.8 --n-steps 1024 --batch-size 2048 --total-timesteps 1000000 --learning-rate 3e-4 --render
 
 # 1.2 Pattern Recognition - Start seeing opponent habits  
 python train.py --resume trained_models_jepa_prime/ppo_jepa_prime_1000000_steps.zip --ent-coef 0.4 --n-steps 1024 --batch-size 512 --total-timesteps 1500000 --learning-rate 2.5e-4

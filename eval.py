@@ -7,12 +7,12 @@ import retro
 import gymnasium as gym
 from stable_baselines3 import PPO
 
-# Import the wrapper
-from wrapper import SamuraiShowdownCustomWrapper
+# Import the JEPA-enhanced wrapper
+from wrapper import make_jepa_samurai_env, SamuraiJEPAWrapper
 
 
-def create_eval_env(game, state):
-    """Create evaluation environment aligned with CUDA training setup"""
+def create_eval_env(game, state, enable_jepa=True):
+    """Create evaluation environment with JEPA enhancement support"""
     # Handle state file path
     if state and os.path.isfile(state):
         state_file = os.path.abspath(state)
@@ -21,23 +21,46 @@ def create_eval_env(game, state):
         state_file = state
         print(f"Using state: {state_file if state_file else 'default'}")
 
-    # Create retro environment with rendering enabled
-    env = retro.make(
-        game=game,
-        state=state_file,
-        use_restricted_actions=retro.Actions.FILTERED,
-        obs_type=retro.Observations.IMAGE,
-        render_mode="human",  # Enable rendering for human observation
-    )
+    if enable_jepa:
+        # Create JEPA-enhanced environment
+        print("🧠 Creating JEPA-Enhanced Environment...")
+        env = make_jepa_samurai_env(
+            game=game,
+            state=state_file,
+            reset_round=True,
+            rendering=True,
+            max_episode_steps=15000,
+            enable_jepa=True,
+            frame_stack=6,  # JEPA uses 6-frame stacks
+        )
+        print(f"✅ JEPA-Enhanced environment created!")
+        print(f"   📊 Binary outcome prediction: Enabled")
+        print(f"   🎯 Strategic response planning: Enabled")
+        print(f"   🔮 Prediction horizon: 6 frames")
+    else:
+        # Create basic retro environment
+        print("🎮 Creating Basic Environment...")
+        env = retro.make(
+            game=game,
+            state=state_file,
+            use_restricted_actions=retro.Actions.FILTERED,
+            obs_type=retro.Observations.IMAGE,
+            render_mode="human",
+        )
 
-    # Apply custom wrapper with same settings as CUDA training
-    # IMPORTANT: Must match training wrapper configuration exactly!
-    env = SamuraiShowdownCustomWrapper(
-        env,
-        reset_round=True,
-        rendering=True,
-        max_episode_steps=15000,  # Match CUDA training configuration
-    )
+        # Apply basic wrapper (fallback compatibility)
+        try:
+            from wrapper import SamuraiShowdownCustomWrapper
+
+            env = SamuraiShowdownCustomWrapper(
+                env,
+                reset_round=True,
+                rendering=True,
+                max_episode_steps=15000,
+            )
+            print("✅ Basic wrapper applied")
+        except ImportError:
+            print("⚠️ Basic wrapper not available, using raw environment")
 
     # Print observation space for debugging
     print(f"🔍 Evaluation environment observation space: {env.observation_space.shape}")
@@ -95,15 +118,81 @@ def convert_observation_format(obs, target_shape):
     return obs
 
 
+def display_jepa_info(info, step_count):
+    """Display JEPA prediction information if available"""
+    # Check if JEPA is actually working (even if not explicitly enabled in info)
+    predictions = info.get("predicted_binary_outcomes")
+    if predictions is None:
+        return
+
+    # Get JEPA predictions
+    predictions = info.get("predicted_binary_outcomes")
+    confidence = info.get("prediction_confidence")
+    strategic_stats = info.get("strategic_stats", {})
+
+    if predictions is not None and step_count % 300 == 0:  # Every 5 seconds at 60 FPS
+        print(f"🔮 JEPA Predictions (Step {step_count}):")
+
+        outcome_types = info.get(
+            "binary_prediction_types",
+            [
+                "will_opponent_attack",
+                "will_opponent_take_damage",
+                "will_player_take_damage",
+                "will_round_end_soon",
+            ],
+        )
+
+        for i, outcome_type in enumerate(outcome_types):
+            if outcome_type in predictions:
+                prob = (
+                    predictions[outcome_type][0, 0]
+                    if predictions[outcome_type].size > 0
+                    else 0
+                )
+                conf = (
+                    confidence[i, 0]
+                    if confidence is not None and confidence.size > i
+                    else 0
+                )
+
+                # Create readable prediction
+                outcome_name = outcome_type.replace("will_", "").replace("_", " ")
+                confidence_level = (
+                    "HIGH" if conf > 0.7 else "MED" if conf > 0.4 else "LOW"
+                )
+
+                if prob > 0.6:
+                    print(
+                        f"   🟢 {outcome_name}: {prob:.1%} ({confidence_level} confidence)"
+                    )
+                elif prob < 0.4:
+                    print(
+                        f"   🔴 {outcome_name}: {prob:.1%} ({confidence_level} confidence)"
+                    )
+                else:
+                    print(
+                        f"   🟡 {outcome_name}: {prob:.1%} ({confidence_level} confidence)"
+                    )
+
+        # Show strategic stats occasionally
+        if strategic_stats and step_count % 600 == 0:  # Every 10 seconds
+            print(f"📊 Strategic Stats:")
+            attack_acc = strategic_stats.get("attack_prediction_accuracy", 0)
+            total_preds = strategic_stats.get("binary_predictions_made", 0)
+            print(f"   Attack prediction accuracy: {attack_acc:.1%}")
+            print(f"   Total predictions made: {total_preds}")
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate trained Samurai Showdown Agent - CUDA Version"
+        description="Evaluate trained Samurai Showdown Agent - JEPA Enhanced Version"
     )
     parser.add_argument(
         "--model-path",
         type=str,
         default="trained_models_fighting_optimized/ppo_fighting_optimized_16950000_steps.zip",
-        help="Path to the trained CUDA model",
+        help="Path to the trained model",
     )
     parser.add_argument(
         "--state-file",
@@ -138,6 +227,16 @@ def main():
         action="store_true",
         help="Force CPU evaluation even if CUDA is available",
     )
+    parser.add_argument(
+        "--disable-jepa",
+        action="store_true",
+        help="Disable JEPA features (use basic wrapper)",
+    )
+    parser.add_argument(
+        "--show-jepa-predictions",
+        action="store_true",
+        help="Display JEPA predictions during gameplay",
+    )
 
     args = parser.parse_args()
 
@@ -146,11 +245,13 @@ def main():
         print(f"❌ Error: Model file not found at {args.model_path}")
         print("Available models:")
 
-        # Check both CUDA and CPU model directories
+        # Check multiple model directories
         for dir_name in [
+            "trained_models_fighting_optimized",
             "trained_models_samurai_cuda",
             "trained_models_samurai_cpu",
             "trained_models_samurai",
+            "trained_models",
         ]:
             if os.path.exists(dir_name):
                 print(f"   {dir_name}/:")
@@ -168,27 +269,32 @@ def main():
     else:
         state_file = args.state_file
 
-    print(f"🚀 CUDA Model Evaluation")
+    print(f"🚀 JEPA-Enhanced Model Evaluation")
     print(f"🤖 Loading model from: {args.model_path}")
     print(f"🎮 Using state file: {state_file if state_file else 'default'}")
     print(f"🔄 Will run {args.episodes} episodes")
     print(f"⚡ Running at {args.fps} FPS for smooth gameplay")
     print(f"🎯 Deterministic actions: {'Yes' if args.deterministic else 'No'}")
-    print(f"✅ Full action space enabled (including jumps)")
+    print(f"🧠 JEPA features: {'Disabled' if args.disable_jepa else 'Enabled'}")
+    print(f"🔮 Show predictions: {'Yes' if args.show_jepa_predictions else 'No'}")
     print("\n🔧 Automatic observation format conversion enabled!")
     print("\nPress Ctrl+C to quit at any time")
     print("=" * 60)
 
     # Create evaluation environment
     try:
-        env = create_eval_env(game, state_file)
+        env = create_eval_env(game, state_file, enable_jepa=not args.disable_jepa)
         print("✅ Environment created successfully!")
     except Exception as e:
         print(f"❌ Error creating environment: {e}")
         print("\n💡 Troubleshooting:")
         print("   - Check if samurai.state file exists")
         print("   - Try using --use-default-state flag")
+        print("   - Try using --disable-jepa flag for compatibility")
         print("   - Ensure SamuraiShodown-Genesis ROM is installed")
+        import traceback
+
+        traceback.print_exc()
         return
 
     # Load the trained model with device selection
@@ -242,6 +348,7 @@ def main():
         print("   - GPU/CPU compatibility issues")
         print("   - Model file is corrupted")
         print("   - Try using --force-cpu flag")
+        print("   - Try using --disable-jepa flag")
         return
 
     # Calculate frame timing
@@ -254,6 +361,13 @@ def main():
         total_reward = 0
         total_steps = 0
 
+        # JEPA-specific tracking
+        jepa_stats = {
+            "total_predictions": 0,
+            "high_confidence_predictions": 0,
+            "strategic_responses": 0,
+        }
+
         # Track action usage
         action_counts = {}
 
@@ -265,9 +379,20 @@ def main():
             step_count = 0
             episode_start_time = time.time()
             episode_actions = []
+            episode_jepa_stats = {"predictions": 0, "high_conf": 0}
+
+            # Check if JEPA is actually working (look for predictions directly)
+            predictions = info.get("predicted_binary_outcomes")
+            jepa_actually_enabled = predictions is not None
+
+            if jepa_actually_enabled:
+                print(
+                    "🧠 JEPA features detected - AI is using predictive intelligence!"
+                )
+            else:
+                print("🎮 Basic AI mode - traditional reactive gameplay")
 
             print("🎬 Starting new match... Watch the game window!")
-            print("🎮 AI can now use full action space (including jumps)!")
 
             while True:
                 step_start_time = time.time()
@@ -282,8 +407,12 @@ def main():
                     obs_for_model, deterministic=args.deterministic
                 )
 
-                # Track action usage
-                action_key = str(action) if hasattr(action, "__iter__") else int(action)
+                # Track action usage - fix action diversity counting
+                action_key = (
+                    int(action)
+                    if hasattr(action, "__len__") and len(action) == 1
+                    else int(action)
+                )
                 action_counts[action_key] = action_counts.get(action_key, 0) + 1
                 episode_actions.append(action_key)
 
@@ -292,6 +421,30 @@ def main():
 
                 episode_reward += reward
                 step_count += 1
+
+                # Track JEPA stats - check for actual predictions
+                predictions = info.get("predicted_binary_outcomes")
+                if predictions is not None:
+                    strategic_stats = info.get("strategic_stats", {})
+                    preds_made = strategic_stats.get("binary_predictions_made", 0)
+                    if preds_made > episode_jepa_stats["predictions"]:
+                        episode_jepa_stats["predictions"] = preds_made
+                        jepa_stats["total_predictions"] += 1
+
+                        # Check if high confidence - lower threshold for detection
+                        confidence = info.get("prediction_confidence")
+                        if (
+                            confidence is not None and confidence.max() > 0.5
+                        ):  # Lowered from 0.7
+                            jepa_stats["high_confidence_predictions"] += 1
+                            episode_jepa_stats["high_conf"] += 1
+
+                # Display JEPA predictions if requested - check for actual predictions
+                if (
+                    args.show_jepa_predictions
+                    and info.get("predicted_binary_outcomes") is not None
+                ):
+                    display_jepa_info(info, step_count)
 
                 # Frame rate limiting
                 elapsed = time.time() - step_start_time
@@ -320,6 +473,43 @@ def main():
             print(f"   Total reward: {episode_reward:.1f}")
             print(f"   Steps taken: {step_count}")
             print(f"   Episode duration: {episode_time:.1f}s")
+
+            # JEPA episode stats - check for actual predictions
+            predictions = info.get("predicted_binary_outcomes")
+            if predictions is not None:
+                print(
+                    f"   🧠 JEPA predictions made: {episode_jepa_stats['predictions']}"
+                )
+                print(
+                    f"   🎯 High confidence predictions: {episode_jepa_stats['high_conf']}"
+                )
+
+                # Show current strategic stats
+                strategic_stats = info.get("strategic_stats", {})
+                if strategic_stats:
+                    attack_acc = strategic_stats.get("attack_prediction_accuracy", 0)
+                    if attack_acc > 0:
+                        print(f"   📊 Attack prediction accuracy: {attack_acc:.1%}")
+
+                    # Show some sample predictions
+                    if len(predictions) > 0:
+                        print(f"   🔮 Sample predictions:")
+                        for outcome_type, pred_data in list(predictions.items())[
+                            :2
+                        ]:  # Show first 2
+                            if hasattr(pred_data, "shape") and pred_data.size > 0:
+                                prob = (
+                                    pred_data[0, 0]
+                                    if pred_data.ndim >= 2
+                                    else pred_data[0]
+                                )
+                                outcome_name = outcome_type.replace(
+                                    "will_", ""
+                                ).replace("_", " ")
+                                print(f"      {outcome_name}: {prob:.1%}")
+
+            else:
+                print(f"   ⚠️ JEPA initialized but no predictions detected")
 
             # Get final health values
             player_hp = info.get("health", 0)
@@ -359,6 +549,26 @@ def main():
             print(f"   Average Reward: {avg_reward:.1f}")
             print(f"   Average Steps: {avg_steps:.0f}")
 
+        # JEPA-specific results
+        if jepa_stats["total_predictions"] > 0:
+            print(f"\n🧠 JEPA Intelligence Analysis:")
+            print(f"   Total predictions made: {jepa_stats['total_predictions']}")
+            print(
+                f"   High confidence predictions: {jepa_stats['high_confidence_predictions']}"
+            )
+            high_conf_rate = (
+                jepa_stats["high_confidence_predictions"]
+                / jepa_stats["total_predictions"]
+            ) * 100
+            print(f"   High confidence rate: {high_conf_rate:.1f}%")
+
+            if high_conf_rate >= 60:
+                print("   🎯 Excellent prediction confidence!")
+            elif high_conf_rate >= 40:
+                print("   👍 Good prediction confidence!")
+            else:
+                print("   📈 Prediction confidence improving!")
+
         # Action analysis
         print(f"\n🎮 Action Usage Analysis:")
         print(f"   Total unique actions used: {len(action_counts)}")
@@ -390,6 +600,12 @@ def main():
             print("👍 Moderate action diversity - AI uses several moves")
         else:
             print("⚠️ Limited action diversity - AI might need more training")
+
+        # JEPA assessment
+        if jepa_stats["total_predictions"] > 0:
+            print("✅ JEPA predictive intelligence is active and working!")
+        elif not args.disable_jepa:
+            print("⚠️ JEPA features enabled but no predictions detected")
 
     except KeyboardInterrupt:
         print("\n\n⏹️  Evaluation interrupted by user")
