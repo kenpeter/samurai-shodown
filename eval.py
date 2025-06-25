@@ -298,7 +298,7 @@ def main():
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_jepa_prime/ppo_jepa_prime_1000000_steps.zip",
+        default="trained_models_jepa_prime/ppo_jepa_prime_2450000_steps.zip",
         help="Path to the trained model",
     )
     parser.add_argument(
