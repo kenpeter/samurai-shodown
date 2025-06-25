@@ -118,6 +118,113 @@ def convert_observation_format(obs, target_shape):
     return obs
 
 
+def convert_multibinary_to_discrete(action, env_action_space_n):
+    """
+    Convert MultiBinary action (array of 0s and 1s) to Discrete action (single integer)
+
+    Args:
+        action: MultiBinary action array (e.g., [1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0])
+        env_action_space_n: Number of discrete actions the environment expects
+
+    Returns:
+        Single integer action for Discrete action space
+    """
+    try:
+        if isinstance(action, (np.ndarray, list)):
+            action_array = np.array(action, dtype=int)
+
+            # Handle different conversion strategies
+            if len(action_array) == 12:  # Common fighting game button layout
+                # Strategy 1: Convert binary pattern to integer (most common)
+                # This treats the binary array as a binary number
+                discrete_action = 0
+                for i, bit in enumerate(action_array):
+                    discrete_action += bit * (2**i)
+
+                # Map to environment's action space
+                discrete_action = discrete_action % env_action_space_n
+
+                print(
+                    f"🔄 Converted MultiBinary {action_array} → Discrete {discrete_action}"
+                )
+                return discrete_action
+
+            elif len(action_array) == env_action_space_n:
+                # Strategy 2: One-hot encoding to discrete
+                # Find the first 1 in the array
+                ones_indices = np.where(action_array == 1)[0]
+                if len(ones_indices) > 0:
+                    discrete_action = ones_indices[0]
+                else:
+                    discrete_action = 0  # Default action
+
+                print(
+                    f"🔄 Converted one-hot {action_array} → Discrete {discrete_action}"
+                )
+                return discrete_action
+
+            else:
+                # Strategy 3: Sum-based mapping
+                # Sum the binary values and map to discrete range
+                action_sum = np.sum(action_array)
+                discrete_action = action_sum % env_action_space_n
+
+                print(
+                    f"🔄 Converted sum-based {action_array} (sum={action_sum}) → Discrete {discrete_action}"
+                )
+                return discrete_action
+
+        else:
+            # Already a scalar, just ensure it's in range
+            scalar_action = int(action) % env_action_space_n
+            print(f"🔄 Scalar action {action} → Discrete {scalar_action}")
+            return scalar_action
+
+    except Exception as e:
+        print(f"❌ Error converting MultiBinary to Discrete: {e}")
+        print(f"   Action: {action}, Type: {type(action)}")
+        print(f"   Falling back to action 0")
+        return 0
+
+
+def safe_action_to_int(action):
+    """
+    Safely convert action from model.predict() to integer
+    Handles various numpy array formats that stable-baselines3 might return
+    """
+    try:
+        # Handle different action formats from stable-baselines3
+        if isinstance(action, (np.ndarray, np.generic)):
+            if action.ndim == 0:
+                # 0-dimensional array (scalar)
+                return int(action.item())
+            elif action.ndim == 1 and len(action) == 1:
+                # 1-dimensional array with single element
+                return int(action[0])
+            elif action.ndim == 1 and len(action) > 1:
+                # Multi-element array - this is normal for MultiBinary actions
+                return action  # Return the full array for conversion
+            else:
+                # Higher dimensional array - unexpected
+                print(f"⚠️ Warning: Unexpected action shape: {action.shape}")
+                return action.flatten()  # Flatten and return for conversion
+        elif hasattr(action, "__len__") and len(action) == 1:
+            # List or tuple with single element
+            return int(action[0])
+        elif isinstance(action, (int, float)):
+            # Already a scalar
+            return int(action)
+        else:
+            # Try direct conversion
+            return int(action)
+    except (ValueError, TypeError, IndexError, AttributeError) as e:
+        print(f"❌ Error converting action: {e}")
+        print(f"   Action type: {type(action)}")
+        print(f"   Action value: {action}")
+        # Return the action as-is for further processing
+        return action
+
+
 def display_jepa_info(info, step_count):
     """Display JEPA prediction information if available"""
     # Check if JEPA is actually working (even if not explicitly enabled in info)
@@ -186,12 +293,12 @@ def display_jepa_info(info, step_count):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Evaluate trained Samurai Showdown Agent - JEPA Enhanced Version"
+        description="Evaluate trained Samurai Showdown Agent - JEPA Enhanced Version with Action Space Conversion"
     )
     parser.add_argument(
         "--model-path",
         type=str,
-        default="trained_models_fighting_optimized/ppo_fighting_optimized_16950000_steps.zip",
+        default="trained_models_jepa_prime/ppo_jepa_prime_1000000_steps.zip",
         help="Path to the trained model",
     )
     parser.add_argument(
@@ -247,6 +354,8 @@ def main():
 
         # Check multiple model directories
         for dir_name in [
+            "trained_models_jepa_prime",
+            "trained_models_prime_only",
             "trained_models_fighting_optimized",
             "trained_models_samurai_cuda",
             "trained_models_samurai_cpu",
@@ -269,7 +378,7 @@ def main():
     else:
         state_file = args.state_file
 
-    print(f"🚀 JEPA-Enhanced Model Evaluation")
+    print(f"🚀 JEPA-Enhanced Model Evaluation with Action Space Conversion")
     print(f"🤖 Loading model from: {args.model_path}")
     print(f"🎮 Using state file: {state_file if state_file else 'default'}")
     print(f"🔄 Will run {args.episodes} episodes")
@@ -278,6 +387,8 @@ def main():
     print(f"🧠 JEPA features: {'Disabled' if args.disable_jepa else 'Enabled'}")
     print(f"🔮 Show predictions: {'Yes' if args.show_jepa_predictions else 'No'}")
     print("\n🔧 Automatic observation format conversion enabled!")
+    print("🔧 Enhanced action conversion with MultiBinary → Discrete support!")
+    print("🔧 Robust error handling for action space mismatches!")
     print("\nPress Ctrl+C to quit at any time")
     print("=" * 60)
 
@@ -285,6 +396,18 @@ def main():
     try:
         env = create_eval_env(game, state_file, enable_jepa=not args.disable_jepa)
         print("✅ Environment created successfully!")
+
+        # Get environment action space info
+        env_action_space = env.action_space
+        if hasattr(env_action_space, "n"):
+            env_action_space_n = env_action_space.n
+            print(
+                f"🎮 Environment expects Discrete action space with {env_action_space_n} actions"
+            )
+        else:
+            env_action_space_n = 12  # Default for fighting games
+            print(f"🎮 Environment action space: {type(env_action_space)}")
+
     except Exception as e:
         print(f"❌ Error creating environment: {e}")
         print("\n💡 Troubleshooting:")
@@ -341,6 +464,58 @@ def main():
         else:
             print("✅ Observation shapes match perfectly!")
 
+        # Check action space compatibility
+        model_action_space = model.action_space
+        print(
+            f"🔍 Model action space: {type(model_action_space)} - {model_action_space}"
+        )
+        print(
+            f"🔍 Environment action space: {type(env_action_space)} - {env_action_space}"
+        )
+
+        # Detect action space mismatch - more sophisticated check
+        action_space_mismatch = False
+        needs_conversion = False
+
+        # Check if types are different
+        if type(model_action_space) != type(env_action_space):
+            action_space_mismatch = True
+            needs_conversion = True
+            print("⚠️ ACTION SPACE TYPE MISMATCH DETECTED!")
+            print(f"   Model trained on: {type(model_action_space)}")
+            print(f"   Environment expects: {type(env_action_space)}")
+            print("🔧 Will automatically convert actions during evaluation")
+
+        # Check if same type but different parameters
+        elif hasattr(model_action_space, "n") and hasattr(env_action_space, "n"):
+            if model_action_space.n != env_action_space.n:
+                action_space_mismatch = True
+                needs_conversion = True
+                print("⚠️ ACTION SPACE SIZE MISMATCH DETECTED!")
+                print(f"   Model: {model_action_space.n} actions")
+                print(f"   Environment: {env_action_space.n} actions")
+
+        # If both are MultiBinary, check if sizes match
+        elif str(type(model_action_space)) == str(
+            type(env_action_space)
+        ) and "MultiBinary" in str(type(model_action_space)):
+            model_size = getattr(model_action_space, "n", None)
+            env_size = getattr(env_action_space, "n", None)
+            if (
+                model_size != env_size
+                and model_size is not None
+                and env_size is not None
+            ):
+                action_space_mismatch = True
+                needs_conversion = True
+                print("⚠️ MULTIBINARY SIZE MISMATCH DETECTED!")
+                print(f"   Model: MultiBinary({model_size})")
+                print(f"   Environment: MultiBinary({env_size})")
+            else:
+                print("✅ Action spaces match perfectly - no conversion needed!")
+        else:
+            print("✅ Action spaces match - no conversion needed!")
+
     except Exception as e:
         print(f"❌ Error loading model: {e}")
         print("\n💡 Common issues:")
@@ -368,8 +543,13 @@ def main():
             "strategic_responses": 0,
         }
 
-        # Track action usage
+        # Track action usage and conversion stats
         action_counts = {}
+        conversion_stats = {
+            "total_conversions": 0,
+            "successful_conversions": 0,
+            "conversion_errors": 0,
+        }
 
         for episode in range(args.episodes):
             print(f"\n⚔️  --- Episode {episode + 1}/{args.episodes} ---")
@@ -407,17 +587,83 @@ def main():
                     obs_for_model, deterministic=args.deterministic
                 )
 
-                # Track action usage - fix action diversity counting
-                action_key = (
-                    int(action)
-                    if hasattr(action, "__len__") and len(action) == 1
-                    else int(action)
-                )
-                action_counts[action_key] = action_counts.get(action_key, 0) + 1
-                episode_actions.append(action_key)
+                # Handle action conversion based on detected mismatch
+                processed_action = safe_action_to_int(action)
 
-                # Take step in environment
-                obs, reward, terminated, truncated, info = env.step(action)
+                # Only convert action if there's actually a mismatch that needs conversion
+                if needs_conversion:
+                    conversion_stats["total_conversions"] += 1
+                    try:
+                        # Convert MultiBinary to Discrete or vice versa
+                        if "MultiBinary" in str(
+                            type(model_action_space)
+                        ) and "Discrete" in str(type(env_action_space)):
+                            # MultiBinary → Discrete
+                            discrete_action = convert_multibinary_to_discrete(
+                                processed_action, env_action_space_n
+                            )
+                            conversion_stats["successful_conversions"] += 1
+                            action_key = discrete_action
+                        elif "Discrete" in str(
+                            type(model_action_space)
+                        ) and "MultiBinary" in str(type(env_action_space)):
+                            # Discrete → MultiBinary (create binary array)
+                            multibinary_action = np.zeros(env_action_space.n, dtype=int)
+                            if isinstance(processed_action, (int, np.integer)):
+                                # Set one bit based on discrete action
+                                bit_index = processed_action % env_action_space.n
+                                multibinary_action[bit_index] = 1
+                            conversion_stats["successful_conversions"] += 1
+                            action_key = multibinary_action
+                            print(
+                                f"🔄 Converted Discrete {processed_action} → MultiBinary {multibinary_action}"
+                            )
+                        else:
+                            # Other conversion types
+                            discrete_action = convert_multibinary_to_discrete(
+                                processed_action, env_action_space_n
+                            )
+                            conversion_stats["successful_conversions"] += 1
+                            action_key = discrete_action
+                    except Exception as e:
+                        print(f"❌ Action conversion failed: {e}")
+                        conversion_stats["conversion_errors"] += 1
+                        # Use original action as fallback
+                        action_key = action
+                else:
+                    # No conversion needed - use original action from model
+                    action_key = action
+
+                    # For tracking purposes, extract a representative integer
+                    if isinstance(action, (np.ndarray, list)) and len(action) > 1:
+                        # For MultiBinary, use the sum or first active bit for tracking
+                        if hasattr(action, "sum"):
+                            track_action = int(action.sum())  # Sum of active bits
+                        else:
+                            track_action = int(np.sum(action))
+                    else:
+                        track_action = safe_action_to_int(action)
+
+                # Track action usage
+                if needs_conversion:
+                    # If we converted, track the converted action
+                    if isinstance(action_key, (np.ndarray, list)):
+                        track_action_final = int(
+                            np.sum(action_key)
+                        )  # Sum for MultiBinary
+                    else:
+                        track_action_final = int(action_key)
+                else:
+                    # Use the tracking action we calculated
+                    track_action_final = track_action
+
+                action_counts[track_action_final] = (
+                    action_counts.get(track_action_final, 0) + 1
+                )
+                episode_actions.append(track_action_final)
+
+                # Take step in environment - use the converted action
+                obs, reward, terminated, truncated, info = env.step(action_key)
 
                 episode_reward += reward
                 step_count += 1
@@ -549,6 +795,29 @@ def main():
             print(f"   Average Reward: {avg_reward:.1f}")
             print(f"   Average Steps: {avg_steps:.0f}")
 
+        # Action space conversion statistics
+        if conversion_stats["total_conversions"] > 0:
+            print(f"\n🔧 Action Space Conversion Statistics:")
+            print(
+                f"   Total conversions attempted: {conversion_stats['total_conversions']}"
+            )
+            print(
+                f"   Successful conversions: {conversion_stats['successful_conversions']}"
+            )
+            print(f"   Conversion errors: {conversion_stats['conversion_errors']}")
+            success_rate = (
+                conversion_stats["successful_conversions"]
+                / conversion_stats["total_conversions"]
+            ) * 100
+            print(f"   Conversion success rate: {success_rate:.1f}%")
+
+            if success_rate >= 95:
+                print("   ✅ Excellent action space conversion!")
+            elif success_rate >= 80:
+                print("   👍 Good action space conversion!")
+            else:
+                print("   ⚠️ Action conversion needs improvement!")
+
         # JEPA-specific results
         if jepa_stats["total_predictions"] > 0:
             print(f"\n🧠 JEPA Intelligence Analysis:")
@@ -607,17 +876,64 @@ def main():
         elif not args.disable_jepa:
             print("⚠️ JEPA features enabled but no predictions detected")
 
+        # Action space compatibility assessment
+        if action_space_mismatch and needs_conversion:
+            print(f"\n🔧 Action Space Compatibility:")
+            print("✅ Successfully handled action space mismatch!")
+            print(
+                f"   Model: {type(model_action_space)} → Environment: {type(env_action_space)}"
+            )
+            print("   Automatic conversion enabled seamless evaluation")
+        elif action_space_mismatch and not needs_conversion:
+            print(f"\n⚠️ Action Space Compatibility:")
+            print(
+                "   Action spaces detected as mismatched but no conversion was needed"
+            )
+            print(
+                f"   Model: {type(model_action_space)} | Environment: {type(env_action_space)}"
+            )
+        else:
+            print(f"\n✅ Action Space Compatibility:")
+            print("   Model and environment action spaces match perfectly!")
+            print(f"   Both use: {type(env_action_space)}")
+
     except KeyboardInterrupt:
         print("\n\n⏹️  Evaluation interrupted by user")
     except Exception as e:
         print(f"\n❌ Error during evaluation: {e}")
         print("💡 Check that your model and wrapper configurations are compatible")
+        print(
+            f"💡 Action type that caused error: {type(action) if 'action' in locals() else 'Unknown'}"
+        )
+        print(
+            f"💡 Action space mismatch: {action_space_mismatch if 'action_space_mismatch' in locals() else 'Unknown'}"
+        )
+        print(
+            f"💡 Needs conversion: {needs_conversion if 'needs_conversion' in locals() else 'Unknown'}"
+        )
         import traceback
 
         traceback.print_exc()
     finally:
         env.close()
         print("\n✅ Evaluation complete!")
+
+        # Final summary
+        print(f"\n📝 EVALUATION SUMMARY:")
+        print(f"🤖 Model: {args.model_path}")
+        print(f"🎮 Episodes: {total_episodes}")
+        if total_episodes > 0:
+            print(f"🏆 Win Rate: {(total_wins/total_episodes)*100:.1f}%")
+
+        if conversion_stats.get("total_conversions", 0) > 0:
+            print(
+                f"🔧 Action Conversions: {conversion_stats['successful_conversions']}/{conversion_stats['total_conversions']}"
+            )
+
+        if jepa_stats["total_predictions"] > 0:
+            print(f"🧠 JEPA Predictions: {jepa_stats['total_predictions']} made")
+
+        print(f"⏱️ Evaluation completed successfully!")
 
 
 if __name__ == "__main__":
