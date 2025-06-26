@@ -29,10 +29,14 @@ from typing import Dict, Tuple, Optional, List
 class PositionalEncoding(nn.Module):
     """Adds positional information to the input sequence for the Transformer."""
 
+    # pass self, model, drop 0.1, max len 5000
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
+        # init super
         super().__init__()
+        # drop out
         self.dropout = nn.Dropout(p=dropout)
 
+        # position, torch array range, unsqueeze insert at index 1. [5] -> [5, 1] (rows, cols), so it is col vector
         position = torch.arange(max_len).unsqueeze(1)
         div_term = torch.exp(
             torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)
@@ -84,7 +88,10 @@ class JEPASimpleBinaryPredictor(nn.Module):
 
         # Transformer for temporal sequence modeling
         d_model = feature_dim * 2  # Combined context and game state
+
+        # only encode position
         self.pos_encoder = PositionalEncoding(d_model, dropout=0.1)
+
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=4,
@@ -345,7 +352,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         damage_dealt = self.prev_enemy_health - current_enemy_health
         damage_taken = self.prev_player_health - current_player_health
 
-        # Simple reward shaping
+        # better damage, so
         enhanced_reward = (damage_dealt - damage_taken) * 0.1
 
         self.prev_player_health = current_player_health
