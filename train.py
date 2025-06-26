@@ -37,11 +37,17 @@ class JEPATrainingCallback(BaseCallback):
         if time.time() - self.last_log_time > 60:  # Log every 60 seconds
             self.last_log_time = time.time()
 
-            # Access stats directly from the single Monitor-wrapped environment
-            info = self.training_env.get_episode_rewards()
-            if len(info) > 0:
-                # Get win/loss from the info buffer, requires custom stats in wrapper
-                stats = self.training_env.get_attr("current_stats")[0]
+            # **THE FIX IS HERE:**
+            # We use `get_attr` to access the `current_stats` from the
+            # underlying SamuraiJEPAWrapper in each sub-environment.
+            # This works for both DummyVecEnv and SubprocVecEnv.
+            all_stats = self.training_env.get_attr("current_stats")
+
+            if all_stats and len(all_stats) > 0:
+                # Aggregate stats from all environments (even if there's only one)
+                stats = all_stats[
+                    0
+                ]  # Since it's a single env, we take the first element
                 wins = stats.get("wins", 0)
                 losses = stats.get("losses", 0)
                 total_rounds = stats.get("total_rounds", 0)
