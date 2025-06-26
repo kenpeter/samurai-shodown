@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Training Script - FIXED & UPGRADED VERSION
+JEPA-Enhanced Samurai Training Script - SINGLE-ENVIRONMENT VERSION
 
 Key Fixes & Upgrades:
-- Simplified arguments: JEPA is on by default, use --no-jepa to disable.
-- Integrates the new Transformer-based JEPA wrapper.
+- Simplified to run with a single environment (No multiprocessing).
+- Easier to debug and run on any system.
+- Integrates the Transformer-based JEPA wrapper.
 - Robust training loop with detailed callbacks and VRAM management.
-- Eliminates harmful randomness sources for stable training.
 """
 import os
 import argparse
@@ -15,19 +15,11 @@ import torch
 import torch.nn as nn
 import numpy as np
 from collections import deque
-
-# Use stable-retro for gymnasium compatibility
-try:
-    import stable_retro as retro
-
-    print("🎮 Using stable-retro (gymnasium compatible)")
-except ImportError:
-    raise ImportError("stable-retro not found. Install with: pip install stable-retro")
+import retro
 
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 
 # Import JEPA-enhanced components from the fixed wrapper
 from wrapper import SamuraiJEPAWrapper, JEPAEnhancedCNN
@@ -45,17 +37,22 @@ class JEPATrainingCallback(BaseCallback):
         if time.time() - self.last_log_time > 60:  # Log every 60 seconds
             self.last_log_time = time.time()
 
-            # Aggregate stats from all environments in the VecEnv
-            all_stats = self.training_env.get_attr("current_stats")
-            wins = sum(s.get("wins", 0) for s in all_stats)
-            losses = sum(s.get("losses", 0) for s in all_stats)
-            total_rounds = sum(s.get("total_rounds", 0) for s in all_stats)
-            win_rate = (wins / total_rounds * 100) if total_rounds > 0 else 0
+            # Access stats directly from the single Monitor-wrapped environment
+            info = self.training_env.get_episode_rewards()
+            if len(info) > 0:
+                # Get win/loss from the info buffer, requires custom stats in wrapper
+                stats = self.training_env.get_attr("current_stats")[0]
+                wins = stats.get("wins", 0)
+                losses = stats.get("losses", 0)
+                total_rounds = stats.get("total_rounds", 0)
+                win_rate = (wins / total_rounds * 100) if total_rounds > 0 else 0
 
-            print(f"\n--- 📊 JEPA Training Status @ Step {self.num_timesteps:,} ---")
-            print(
-                f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L in {total_rounds} rounds)"
-            )
+                print(
+                    f"\n--- 📊 JEPA Training Status @ Step {self.num_timesteps:,} ---"
+                )
+                print(
+                    f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L in {total_rounds} rounds)"
+                )
 
             if self.enable_jepa:
                 print(f"   🧠 Architecture: JEPA-Enhanced CNN + Transformer Predictor")
@@ -76,38 +73,13 @@ class JEPATrainingCallback(BaseCallback):
         return True
 
 
-def make_env(game, state, rendering, frame_stack, enable_jepa, rank, seed=0):
-    """Utility function for multiprocessed env creation."""
-
-    def _init():
-        # Use a different state file per process to avoid conflicts if needed, or None
-        env_state = state if rank == 0 else None
-
-        env = retro.make(
-            game=game,
-            state=env_state,
-            use_restricted_actions=retro.Actions.FILTERED,
-            obs_type=retro.Observations.IMAGE,
-            render_mode="human" if rendering and rank == 0 else None,
-        )
-        env = SamuraiJEPAWrapper(env, frame_stack=frame_stack, enable_jepa=enable_jepa)
-        env = Monitor(env)
-        # env.seed(seed + rank) # Seeding is handled by SB3
-        return env
-
-    return _init
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="JEPA Enhanced Fighting Game AI Training"
     )
     parser.add_argument("--total-timesteps", type=int, default=10_000_000)
     parser.add_argument(
-        "--n-envs", type=int, default=8, help="Number of parallel environments"
-    )
-    parser.add_argument(
-        "--n-steps", type=int, default=2048, help="PPO rollout buffer size per env"
+        "--n-steps", type=int, default=2048, help="PPO rollout buffer size"
     )
     parser.add_argument("--batch-size", type=int, default=512, help="PPO batch size")
     parser.add_argument("--lr", type=float, default=2.5e-4, help="Learning rate")
@@ -128,9 +100,7 @@ def main():
         default=None,
         help="Path to a model zip file to resume training",
     )
-    parser.add_argument(
-        "--render", action="store_true", help="Render the first environment"
-    )
+    parser.add_argument("--render", action="store_true", help="Render the environment")
     args = parser.parse_args()
 
     args.enable_jepa = not args.no_jepa
@@ -138,28 +108,37 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mode_name = "JEPA Enhanced" if args.enable_jepa else "Standard CNN"
 
-    print(f"🚀 Starting {mode_name} Training")
+    print(f"🚀 Starting {mode_name} Training (Single Environment)")
     print(f"   💻 Device: {device.upper()}")
-    print(f"    parallèles: {args.n_envs}")
     print(f"   📊 Timesteps: {args.total_timesteps:,}")
 
-    # Environment setup
+    # --- Simplified and Corrected Environment Setup ---
     game = "SamuraiShodown-Genesis"
-    state_file = "samurai.state" if os.path.exists("samurai.state") else None
-    if state_file:
-        print(f"   🎮 Using state file: {state_file}")
-    else:
-        print("   🎮 Using default initial state.")
+    state_filename = "samurai.state"
 
-    # Use SubprocVecEnv for true parallelism
-    env = SubprocVecEnv(
-        [
-            make_env(
-                game, state_file, args.render, args.frame_stack, args.enable_jepa, i
-            )
-            for i in range(args.n_envs)
-        ]
+    # ** THE FIX IS HERE **
+    # We now check for the file and get its absolute path.
+    if os.path.exists(state_filename):
+        # Use the absolute path to the state file. This is more robust.
+        state_path = os.path.abspath(state_filename)
+        print(f"   🎮 Using state file: {state_path}")
+    else:
+        # If the file doesn't exist, use the library's default state constant.
+        state_path = retro.State.DEFAULT
+        print("   🎮 State file not found. Using default initial state.")
+
+    # Create the single environment
+    env = retro.make(
+        game=game,
+        state=state_path,  # Pass the robust path or the default constant
+        use_restricted_actions=retro.Actions.FILTERED,
+        obs_type=retro.Observations.IMAGE,
+        render_mode="human" if args.render else None,
     )
+    env = SamuraiJEPAWrapper(
+        env, frame_stack=args.frame_stack, enable_jepa=args.enable_jepa
+    )
+    env = Monitor(env)  # Monitor wrapper is important for SB3 logging
 
     save_dir = (
         "trained_models_jepa_transformer" if args.enable_jepa else "trained_models_cnn"
@@ -205,19 +184,13 @@ def main():
 
     # **KEY FOR JEPA**: Give the wrapper access to the model's feature extractor
     if args.enable_jepa:
-        for i in range(args.n_envs):
-            # This must be done after model creation
-            env.env_method(
-                "__setattr__",
-                "feature_extractor",
-                model.policy.features_extractor,
-                indices=i,
-            )
-        print("   ✅ Injected PPO feature extractor into JEPA wrappers.")
+        # Since it's not a VecEnv, we access the underlying wrapper directly
+        env.unwrapped.feature_extractor = model.policy.features_extractor
+        print("   ✅ Injected PPO feature extractor into JEPA wrapper.")
 
     # Callbacks
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(50000 // args.n_envs, 1),
+        save_freq=max(50000, args.n_steps),
         save_path=save_dir,
         name_prefix=f"ppo_{'jepa' if args.enable_jepa else 'cnn'}",
     )
