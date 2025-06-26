@@ -499,7 +499,7 @@ class SimpleBinaryResponsePlanner(nn.Module):
 class SamuraiJEPAWrapper(gym.Wrapper):
     """
     Enhanced Samurai Showdown wrapper with JEPA-based opponent state prediction
-    and strategic agent response planning
+    and strategic agent response planning - FIXED VERSION (NO HARMFUL RANDOMNESS)
 
     Features:
     - JEPA-style opponent state prediction from visual embeddings
@@ -624,7 +624,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             dtype=np.uint8,
         )
 
-        print(f"🥷 JEPA-ENHANCED SAMURAI SHOWDOWN WRAPPER:")
+        print(f"🥷 JEPA-ENHANCED SAMURAI SHOWDOWN WRAPPER (FIXED):")
         print(f"   📊 Observation space: {self.observation_space.shape}")
         print(f"   🧠 JEPA enabled: {self.enable_jepa}")
         if self.enable_jepa:
@@ -635,11 +635,12 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             print(f"   ⚔️ Strategic response planning: Enabled")
             print(f"   🎯 Binary outcome prediction: 4 types (60-80% accuracy)")
             print(f"   👁️ Real visual feature extraction: Enabled")
+            print(f"   ✅ NO HARMFUL RANDOMNESS: Deterministic features")
         print(f"   🎮 Frame stacking: {self.frame_stack} frames")
         print(f"   🎯 Target size: {self.target_size}")
 
     def _get_visual_features(self, observation):
-        """Extract real visual features from observation - FIXED VERSION WITH NO FALLBACK RANDOMNESS"""
+        """Extract real visual features from observation - FIXED VERSION (NO RANDOM FALLBACKS)"""
         if self.feature_extractor is None:
             # Initialize a lightweight feature extractor optimized for 6-frame input
             self.feature_extractor = nn.Sequential(
@@ -701,7 +702,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
 
         except Exception as e:
             print(f"⚠️ Visual feature extraction error: {e}")
-            # Create a deterministic fallback based on observation statistics instead of random
+            # FIXED: Create a deterministic fallback based on observation statistics (NO RANDOMNESS)
             if isinstance(observation, np.ndarray):
                 # Use observation statistics to create deterministic features
                 obs_mean = float(np.mean(observation))
@@ -716,9 +717,15 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 deterministic_features[2] = obs_max / 255.0
                 deterministic_features[3] = obs_min / 255.0
 
+                # Fill remaining features with deterministic patterns based on observation
+                # FIXED: Use mathematical functions instead of random values
+                for i in range(4, 512):
+                    # Create deterministic patterns using trigonometric functions
+                    deterministic_features[i] = math.sin(i * obs_mean / 255.0) * 0.1
+
                 return deterministic_features
             else:
-                # Absolute fallback - return zeros instead of random
+                # FIXED: Absolute fallback - return zeros instead of random
                 return torch.zeros(512, device=self.device)
 
     def _initialize_jepa_modules(self, visual_dim=512):
@@ -783,7 +790,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
 
     def _extract_binary_outcomes(self, game_info, action_taken=None):
         """
-        Extract current binary outcomes from game state - ENHANCED VERSION WITH BETTER LABELS
+        Extract current binary outcomes from game state - FIXED VERSION (NO RANDOMNESS)
         Returns 8 values: 4 current + 4 previous binary outcomes
         """
         player_health = game_info.get("player_health", self.full_hp)
@@ -797,7 +804,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             player_damage = max(0, self.prev_player_health - player_health)
             opponent_damage = max(0, self.prev_enemy_health - opponent_health)
 
-        # Enhanced opponent attack detection - IMPROVED VERSION
+        # Enhanced opponent attack detection - IMPROVED VERSION (NO RANDOMNESS)
         opponent_attack = 0.0
         if action_taken is not None:
             try:
@@ -828,7 +835,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 # Fallback: use health change as indicator
                 opponent_attack = float(opponent_damage > 0)
 
-        # Enhanced binary outcomes with context-aware thresholds - FIXED VERSION
+        # Enhanced binary outcomes with context-aware thresholds - FIXED VERSION (NO RANDOMNESS)
         current_outcomes = np.array(
             [
                 opponent_attack,  # will_opponent_attack (enhanced detection)
@@ -865,7 +872,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         return combined_outcomes.astype(np.float32)
 
     def _predict_binary_outcomes(self, visual_features, game_info):
-        """Use JEPA to predict binary outcomes - FIXED VERSION with REAL game state features"""
+        """Use JEPA to predict binary outcomes - FIXED VERSION (NO RANDOM GAME STATE)"""
         if not self.enable_jepa or self.jepa_predictor is None:
             return None, None
 
@@ -887,7 +894,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                         0
                     )  # Add batch dimension
 
-                # REAL game state features - NO MORE RANDOM DATA
+                # FIXED: REAL game state features - NO MORE RANDOM DATA
                 player_health = game_info.get("player_health", 128)
                 opponent_health = game_info.get("opponent_health", 128)
 
@@ -1091,18 +1098,20 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             self.planned_agent_responses = None
             self.prediction_confidence = None
 
-            # Clear binary outcome history and initialize with contextual dummy values
+            # FIXED: Clear binary outcome history and initialize with DETERMINISTIC values
             self.binary_outcome_history.clear()
-            # Initialize with more realistic values instead of all zeros
+            # Initialize with deterministic values instead of random variation
             for i in range(self.state_history_length):
-                # Create slightly varied initial states to avoid all-zero patterns
+                # Create deterministic initial states based on position in sequence
                 base_outcomes = np.array(
                     [0.1, 0.0, 0.0, 0.0, 0.1, 0.0, 0.0, 0.0], dtype=np.float32
                 )
-                # Add small deterministic variation based on position in sequence
-                variation = np.sin(i * 0.5) * 0.05
+                # FIXED: Add deterministic variation based on position (NO RANDOMNESS)
+                variation = i * 0.01  # Simple linear variation instead of sin function
                 base_outcomes[0] += variation  # Slight attack probability variation
                 base_outcomes[4] += variation  # Previous attack probability variation
+                # Clamp to valid range
+                base_outcomes = np.clip(base_outcomes, 0.0, 1.0)
                 self.binary_outcome_history.append(base_outcomes)
 
         # Reset frame buffer
@@ -1462,14 +1471,16 @@ def make_jepa_samurai_env(
 
 
 if __name__ == "__main__":
-    # Test the FULLY FIXED JEPA-enhanced wrapper
+    # Test the FULLY FIXED JEPA-enhanced wrapper (NO HARMFUL RANDOMNESS)
     print("🧪 Testing FULLY FIXED JEPA-Enhanced SamuraiShowdownWrapper...")
-    print("🔧 ALL RANDOM ELEMENTS ELIMINATED:")
-    print("   ✅ Real visual features (no fallback randomness)")
+    print("🔧 ALL HARMFUL RANDOMNESS ELIMINATED:")
+    print("   ✅ Real visual features (deterministic fallback, no torch.randn)")
     print("   ✅ Real game state features (no torch.randn)")
     print("   ✅ Deterministic binary outcome initialization")
     print("   ✅ Enhanced attack detection with multiple heuristics")
     print("   ✅ Confidence-weighted accuracy metrics")
+    print("   ✅ Mathematical fallback features (sin-based, not random)")
+    print("   ⚡ BENEFICIAL randomness preserved: exploration, dropout, PPO")
 
     try:
         env = make_jepa_samurai_env(rendering=False, enable_jepa=True)
@@ -1484,7 +1495,9 @@ if __name__ == "__main__":
 
         # Test steps with JEPA features
         for i in range(10):
-            action = env.action_space.sample()
+            action = (
+                env.action_space.sample()
+            )  # KEEP this randomness - it's beneficial for exploration
             obs, reward, done, truncated, info = env.step(action)
 
             jepa_info = ""
@@ -1519,14 +1532,21 @@ if __name__ == "__main__":
 
         env.close()
         print("✅ FULLY FIXED JEPA-enhanced wrapper test completed successfully!")
-        print("\n🎯 COMPLETE FIXES APPLIED:")
-        print("   🔮 ELIMINATED torch.randn game state features → Real game data")
-        print("   ⚔️ ENHANCED binary outcome detection → Multi-heuristic approach")
-        print("   📊 IMPROVED prediction accuracy tracking → Confidence weighting")
+        print("\n🎯 HARMFUL RANDOMNESS FIXES APPLIED:")
+        print(
+            "   🔮 ELIMINATED torch.randn fallbacks → Deterministic math-based features"
+        )
+        print("   ⚔️ ELIMINATED mock random game state → Real game data only")
+        print("   📊 IMPROVED binary outcome detection → Multi-heuristic approach")
         print("   🎮 BETTER action parsing and game state extraction")
-        print("   💡 DETERMINISTIC fallback features → No random elements")
+        print("   💡 DETERMINISTIC fallback features → Mathematical patterns")
         print("   🚀 OPTIMIZED for stable 11.6GB GPU training")
         print("   🧠 REAL visual features with robust error handling")
+        print("\n✅ BENEFICIAL RANDOMNESS PRESERVED:")
+        print("   🎯 action_space.sample() - Essential for exploration")
+        print("   🧠 PPO's inherent randomness - Core learning mechanism")
+        print("   🛡️ Dropout layers - Prevents overfitting")
+        print("   🎮 Environment stochasticity - Natural game variation")
 
     except Exception as e:
         print(f"❌ JEPA wrapper test failed: {e}")

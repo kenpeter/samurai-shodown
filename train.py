@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 JEPA-Enhanced Samurai Training Script - FIXED VERSION
-Key fix: Removed torch.randn bug on line 215
+Key fix: Eliminated harmful randomness while preserving beneficial training randomness
 """
 
 import os
