@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Showdown Wrapper - ROBUSTNESS UPDATE
+JEPA-Enhanced Samurai Showdown Wrapper - REWARD SHAPING UPDATE
 """
 import math
 import cv2
@@ -15,7 +15,7 @@ from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from typing import Dict, Tuple, Optional, List
 
 
-# --- Transformer Components (No changes needed here) ---
+# --- Transformer Components (No changes) ---
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000):
         super().__init__()
@@ -89,12 +89,10 @@ class JEPASimpleBinaryPredictor(nn.Module):
 # --- Main Environment Wrapper ---
 class SamuraiJEPAWrapper(gym.Wrapper):
     """
-    Enhanced Samurai Showdown wrapper with JEPA-based opponent state prediction.
+    Enhanced Samurai Showdown wrapper with advanced reward shaping.
     """
 
-    def __init__(
-        self, env, frame_stack=8, enable_jepa=True, **kwargs
-    ):  # *** CHANGE: frame_stack default = 8 ***
+    def __init__(self, env, frame_stack=8, enable_jepa=True, **kwargs):
         super().__init__(env)
         self.frame_stack = frame_stack
         self.enable_jepa = enable_jepa
@@ -111,6 +109,11 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         self.prev_player_health = 176
         self.prev_enemy_health = 176
 
+        # Added round tracking for win/loss bonus
+        self.player_wins_in_episode = 0
+        self.enemy_wins_in_episode = 0
+
+        # These stats are for the callback to log progress
         self.current_stats = {
             "wins": 0,
             "losses": 0,
@@ -130,10 +133,9 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             self.jepa_predictor = None
             self.visual_features_history = deque(maxlen=self.state_history_length)
             self.game_state_history = deque(maxlen=self.state_history_length)
-            self.predicted_binary_outcomes = None
 
         print(
-            f"🥷 JEPA Wrapper Initialized: Frame Stack={self.frame_stack}, JEPA Enabled={self.enable_jepa}"
+            f"🥷 JEPA Wrapper Initialized: Reward Shaping Update, Frame Stack={self.frame_stack}"
         )
 
     def _initialize_jepa_modules(self, visual_dim):
@@ -188,10 +190,18 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         obs, info = self.env.reset(**kwargs)
         self.prev_player_health = info.get("health", 176)
         self.prev_enemy_health = info.get("enemy_health", 176)
+
+        # Reset round win counters for the new episode
+        self.player_wins_in_episode = 0
+        self.enemy_wins_in_episode = 0
+
         processed_frame = self._preprocess_frame(obs)
+        self.frame_buffer.clear()
         for _ in range(self.frame_stack):
             self.frame_buffer.append(processed_frame)
+
         if self.enable_jepa:
+            # Initialize history with zeros
             zero_vf = torch.zeros(512, device=self.device)
             zero_gs = np.zeros(8, dtype=np.float32)
             self.visual_features_history.clear()
@@ -199,55 +209,92 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             for _ in range(self.state_history_length):
                 self.visual_features_history.append(zero_vf)
                 self.game_state_history.append(zero_gs)
+
         return self._get_stacked_observation(), info
 
     def step(self, action):
-        obs, reward, terminated, truncated, info = self.env.step(action)
+        obs, _, terminated, truncated, info = self.env.step(action)
         self.frame_buffer.append(self._preprocess_frame(obs))
         stacked_obs = self._get_stacked_observation()
 
         current_player_health = info.get("health", self.prev_player_health)
         current_enemy_health = info.get("enemy_health", self.prev_enemy_health)
 
+        # --- NEW REWARD SHAPING LOGIC ---
+
+        # 1. Health differential reward (damage trade)
         damage_dealt = self.prev_enemy_health - current_enemy_health
         damage_taken = self.prev_player_health - current_player_health
+        health_delta_reward = (
+            damage_dealt * 1.0 - damage_taken * 1.2
+        ) * 0.1  # Softened penalty
 
-        # *** CHANGE: Increased penalty for taking damage ***
-        enhanced_reward = (damage_dealt * 1.0 - damage_taken * 1.5) * 0.1
+        # 2. Survival incentive (time-based)
+        time_reward = 0.001  # Small bonus for each step alive
+
+        # 3. Win/Loss bonus (round-based)
+        win_loss_reward = 0.0
+        # Check if a round has just ended by looking at health dropping to 0
+        if (current_player_health <= 0 or current_enemy_health <= 0) and (
+            self.prev_player_health > 0 and self.prev_enemy_health > 0
+        ):
+            # The second condition ensures this bonus is given only once per round end
+            if current_player_health > current_enemy_health:
+                win_loss_reward = 20.0  # Large bonus for winning a round
+                self.player_wins_in_episode += 1
+            else:
+                win_loss_reward = -20.0  # Large penalty for losing a round
+                self.enemy_wins_in_episode += 1
+
+        # Combine all reward components
+        enhanced_reward = health_delta_reward + time_reward + win_loss_reward
 
         self.prev_player_health = current_player_health
         self.prev_enemy_health = current_enemy_health
 
+        # --- JEPA Logic (unchanged) ---
         if self.enable_jepa and self.feature_extractor:
             if self.jepa_predictor is None:
                 self._initialize_jepa_modules(self.feature_extractor.features_dim)
             visual_features = self._get_visual_features(stacked_obs)
-            game_state = self._extract_game_state(info)
-            self.visual_features_history.append(visual_features)
-            self.game_state_history.append(game_state)
-            vf_seq = torch.stack(list(self.visual_features_history)).unsqueeze(0)
-            gs_seq = torch.tensor(
-                np.array(list(self.game_state_history)),
-                dtype=torch.float32,
-                device=self.device,
-            ).unsqueeze(0)
-            with torch.no_grad():
-                self.predicted_binary_outcomes = self.jepa_predictor(vf_seq, gs_seq)
-            info["jepa_enabled"] = True
-            info["strategic_stats"] = self.strategic_stats
+            if visual_features is not None:
+                game_state = self._extract_game_state(info)
+                self.visual_features_history.append(visual_features)
+                self.game_state_history.append(game_state)
+                vf_seq = torch.stack(list(self.visual_features_history)).unsqueeze(0)
+                gs_seq = torch.tensor(
+                    np.array(list(self.game_state_history)),
+                    dtype=torch.float32,
+                    device=self.device,
+                ).unsqueeze(0)
+                with torch.no_grad():
+                    self.predicted_binary_outcomes = self.jepa_predictor(vf_seq, gs_seq)
+                info["jepa_enabled"] = True
+                info["strategic_stats"] = self.strategic_stats
 
+        # --- Done Signal Logic ---
         done = terminated or truncated
-        if current_enemy_health <= 0 or current_player_health <= 0:
+        # A full match (episode) ends when one player wins 2 rounds.
+        if self.player_wins_in_episode >= 2 or self.enemy_wins_in_episode >= 2:
             done = True
-            self.current_stats["total_rounds"] += 1
-            if current_player_health > current_enemy_health:
+            # Update overall match win/loss stats for the callback
+            if self.player_wins_in_episode > self.enemy_wins_in_episode:
                 self.current_stats["wins"] += 1
             else:
                 self.current_stats["losses"] += 1
-            if self.current_stats["total_rounds"] > 0:
+
+            # Update total rounds for context
+            self.current_stats["total_rounds"] += (
+                self.player_wins_in_episode + self.enemy_wins_in_episode
+            )
+
+            # Recalculate win rate based on total matches
+            total_matches = self.current_stats["wins"] + self.current_stats["losses"]
+            if total_matches > 0:
                 self.current_stats["win_rate"] = (
-                    self.current_stats["wins"] / self.current_stats["total_rounds"]
+                    self.current_stats["wins"] / total_matches
                 )
+
         info["current_stats"] = self.current_stats
 
         return stacked_obs, enhanced_reward, done, False, info
