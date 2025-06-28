@@ -17,4 +17,3 @@ python train.py \
     --ent-coef 0.015 \
     --frame-stack 8 \
     --render
-    --resume trained_models_jepa_prime/ppo_jepa_robust_3450000_steps.zip

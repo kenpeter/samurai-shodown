@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Showdown Wrapper - REWARD SHAPING & ACCURACY LOGGING
+JEPA-Enhanced Samurai Showdown Wrapper - ACCURACY LOGGING FIX
 """
 import math
 import cv2
@@ -115,12 +115,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             "total_rounds": 0,
             "win_rate": 0.0,
         }
-
-        # *** CHANGE: Initialize strategic stats with moving average accuracies ***
-        self.strategic_stats = {
-            "binary_predictions_made": 0,
-            "overall_accuracy": 0.5,  # Start at 50% baseline
-        }
+        self.strategic_stats = {"binary_predictions_made": 0, "overall_accuracy": 0.5}
 
         if self.enable_jepa:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -128,15 +123,11 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             self.jepa_predictor = None
             self.visual_features_history = deque(maxlen=self.state_history_length)
             self.game_state_history = deque(maxlen=self.state_history_length)
-            self.last_predicted_outcomes = (
-                None  # Store the prediction from the previous step
-            )
 
         print(
-            f"🥷 JEPA Wrapper Initialized: Reward Shaping & Accuracy Logging, Frame Stack={self.frame_stack}"
+            f"🥷 JEPA Wrapper Initialized: Reward Shaping & ACCURACY FIX, Frame Stack={self.frame_stack}"
         )
 
-    # ... (_initialize_jepa_modules, _get_visual_features, _preprocess_frame, _get_stacked_observation are unchanged) ...
     def _initialize_jepa_modules(self, visual_dim):
         if self.jepa_predictor is None:
             self.jepa_predictor = JEPASimpleBinaryPredictor(
@@ -168,25 +159,9 @@ class SamuraiJEPAWrapper(gym.Wrapper):
     def _get_stacked_observation(self):
         return np.concatenate(list(self.frame_buffer), axis=2).transpose(2, 0, 1)
 
-    def _extract_game_state(self, info, for_ground_truth=False):
+    def _extract_game_state_vector(self, info):
         player_health = info.get("health", self.prev_player_health)
         enemy_health = info.get("enemy_health", self.prev_enemy_health)
-
-        # If calculating ground truth, we care about what ACTUALLY happened
-        if for_ground_truth:
-            damage_dealt = self.prev_enemy_health - enemy_health > 0
-            damage_taken = self.prev_player_health - player_health > 0
-            # Opponent attack is hard to define perfectly, we'll use a heuristic: they took damage
-            opponent_attacked = damage_dealt
-            round_ending = player_health < 30 or enemy_health < 30
-            return {
-                "will_opponent_attack": float(opponent_attacked),
-                "will_opponent_take_damage": float(damage_dealt),
-                "will_player_take_damage": float(damage_taken),
-                "will_round_end_soon": float(round_ending),
-            }
-
-        # Otherwise, return the standard state vector for the transformer
         return np.array(
             [
                 player_health / 176.0,
@@ -201,39 +176,19 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             dtype=np.float32,
         )
 
-    # *** NEW FUNCTION: To calculate JEPA prediction accuracy ***
-    def _calculate_jepa_accuracy(self, current_info):
-        if self.last_predicted_outcomes is None:
-            return
-
-        # 1. Get the ground truth of what just happened in the current step
-        ground_truth = self._extract_game_state(current_info, for_ground_truth=True)
-
-        # 2. Compare with the prediction made in the *previous* step
-        total_correct = 0
-        num_predictions = 0
-        for key, pred_tensor in self.last_predicted_outcomes.items():
-            if key in ground_truth:
-                # Get the prediction for the very next step (index 0 of the horizon)
-                prediction_prob = pred_tensor[0, 0].item()
-                predicted_label = 1 if prediction_prob > 0.5 else 0
-
-                actual_label = int(ground_truth[key])
-
-                if predicted_label == actual_label:
-                    total_correct += 1
-                num_predictions += 1
-
-        if num_predictions > 0:
-            # 3. Update the overall accuracy using a moving average
-            current_accuracy = total_correct / num_predictions
-            alpha = 0.001  # Smoothing factor for the moving average
-            self.strategic_stats["overall_accuracy"] = (
-                1 - alpha
-            ) * self.strategic_stats["overall_accuracy"] + alpha * current_accuracy
-
-        # 4. Increment the prediction counter
-        self.strategic_stats["binary_predictions_made"] += 1
+    def _get_ground_truth(self, current_info):
+        player_health = current_info.get("health", self.prev_player_health)
+        enemy_health = current_info.get("enemy_health", self.prev_enemy_health)
+        damage_dealt = self.prev_enemy_health - enemy_health > 1
+        damage_taken = self.prev_player_health - player_health > 1
+        opponent_attacked = damage_dealt  # Simple heuristic
+        round_ending = player_health < 30 or enemy_health < 30
+        return {
+            "will_opponent_attack": float(opponent_attacked),
+            "will_opponent_take_damage": float(damage_dealt),
+            "will_player_take_damage": float(damage_taken),
+            "will_round_end_soon": float(round_ending),
+        }
 
     def reset(self, **kwargs):
         obs, info = self.env.reset(**kwargs)
@@ -246,7 +201,6 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         for _ in range(self.frame_stack):
             self.frame_buffer.append(processed_frame)
         if self.enable_jepa:
-            self.last_predicted_outcomes = None
             zero_vf = torch.zeros(512, device=self.device)
             zero_gs = np.zeros(8, dtype=np.float32)
             self.visual_features_history.clear()
@@ -257,24 +211,63 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         return self._get_stacked_observation(), info
 
     def step(self, action):
-        # *** CHANGE: Accuracy calculation is now part of the flow ***
+        # *** NEW, ROBUST LOGIC FLOW ***
 
-        # First, if we have a prediction from the last step, let's see how it did
-        if self.enable_jepa and self.last_predicted_outcomes:
-            # We need the info dict *before* the step to get the ground truth
-            # We'll use the info from the *previous* step's return, but for simplicity here we'll pass the new one.
-            # A more advanced implementation would buffer the previous info dict.
-            # For logging purposes, this is sufficient.
-            self._calculate_jepa_accuracy(self.env.unwrapped.data.lookup_all())
+        # --- 1. PREDICT (based on current state) ---
+        predicted_outcomes = None
+        if self.enable_jepa and self.feature_extractor:
+            if self.jepa_predictor is None:
+                self._initialize_jepa_modules(self.feature_extractor.features_dim)
 
-        obs, _, terminated, truncated, info = self.env.step(action)
+            # We need to get the feature vector for the *current* observation before we step
+            current_stacked_obs = self._get_stacked_observation()
+            visual_features = self._get_visual_features(current_stacked_obs)
+
+            if visual_features is not None:
+                current_info = self.env.unwrapped.data.lookup_all()
+                game_state_vec = self._extract_game_state_vector(current_info)
+
+                # Update history buffers
+                self.visual_features_history.append(visual_features)
+                self.game_state_history.append(game_state_vec)
+
+                # Make prediction
+                vf_seq = torch.stack(list(self.visual_features_history)).unsqueeze(0)
+                gs_seq = torch.tensor(
+                    np.array(list(self.game_state_history)),
+                    dtype=torch.float32,
+                    device=self.device,
+                ).unsqueeze(0)
+                with torch.no_grad():
+                    predicted_outcomes = self.jepa_predictor(vf_seq, gs_seq)
+
+        # --- 2. STEP THE ENVIRONMENT ---
+        obs, _, terminated, truncated, next_info = self.env.step(action)
         self.frame_buffer.append(self._preprocess_frame(obs))
         stacked_obs = self._get_stacked_observation()
 
-        current_player_health = info.get("health", self.prev_player_health)
-        current_enemy_health = info.get("enemy_health", self.prev_enemy_health)
+        # --- 3. CALCULATE ACCURACY (Compare prediction from state N with outcome in state N+1) ---
+        if predicted_outcomes:
+            ground_truth = self._get_ground_truth(next_info)
+            total_correct, num_predictions = 0, 0
+            for key, pred_tensor in predicted_outcomes.items():
+                if key in ground_truth:
+                    predicted_label = 1 if pred_tensor[0, 0].item() > 0.5 else 0
+                    actual_label = int(ground_truth[key])
+                    if predicted_label == actual_label:
+                        total_correct += 1
+                    num_predictions += 1
+            if num_predictions > 0:
+                current_accuracy = total_correct / num_predictions
+                alpha = 0.001  # Moving average smoothing
+                self.strategic_stats["overall_accuracy"] = (
+                    1 - alpha
+                ) * self.strategic_stats["overall_accuracy"] + alpha * current_accuracy
+            self.strategic_stats["binary_predictions_made"] += 1
 
-        # Reward Shaping Logic (unchanged)
+        # --- 4. CALCULATE REWARD ---
+        current_player_health = next_info.get("health", self.prev_player_health)
+        current_enemy_health = next_info.get("enemy_health", self.prev_enemy_health)
         damage_dealt = self.prev_enemy_health - current_enemy_health
         damage_taken = self.prev_player_health - current_player_health
         health_delta_reward = (damage_dealt * 1.0 - damage_taken * 1.2) * 0.1
@@ -294,28 +287,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
         self.prev_player_health = current_player_health
         self.prev_enemy_health = current_enemy_health
 
-        # --- JEPA Logic (Now includes storing the prediction) ---
-        if self.enable_jepa and self.feature_extractor:
-            if self.jepa_predictor is None:
-                self._initialize_jepa_modules(self.feature_extractor.features_dim)
-            visual_features = self._get_visual_features(stacked_obs)
-            if visual_features is not None:
-                game_state = self._extract_game_state(info)
-                self.visual_features_history.append(visual_features)
-                self.game_state_history.append(game_state)
-                vf_seq = torch.stack(list(self.visual_features_history)).unsqueeze(0)
-                gs_seq = torch.tensor(
-                    np.array(list(self.game_state_history)),
-                    dtype=torch.float32,
-                    device=self.device,
-                ).unsqueeze(0)
-                with torch.no_grad():
-                    # Predict outcomes and store them for the *next* step's accuracy check
-                    self.last_predicted_outcomes = self.jepa_predictor(vf_seq, gs_seq)
-
-        info["strategic_stats"] = self.strategic_stats  # Pass stats to the callback
-
-        # --- Done Signal Logic (unchanged) ---
+        # --- 5. BUNDLE INFO AND DONE SIGNAL ---
         done = terminated or truncated
         if self.player_wins_in_episode >= 2 or self.enemy_wins_in_episode >= 2:
             done = True
@@ -323,17 +295,17 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 self.current_stats["wins"] += 1
             else:
                 self.current_stats["losses"] += 1
-            self.current_stats["total_rounds"] = (
-                self.player_wins_in_episode + self.enemy_wins_in_episode
-            )
             total_matches = self.current_stats["wins"] + self.current_stats["losses"]
             if total_matches > 0:
                 self.current_stats["win_rate"] = (
                     self.current_stats["wins"] / total_matches
                 )
-        info["current_stats"] = self.current_stats
 
-        return stacked_obs, enhanced_reward, done, False, info
+        # Pass all relevant info to the callback
+        next_info["current_stats"] = self.current_stats
+        next_info["strategic_stats"] = self.strategic_stats
+
+        return stacked_obs, enhanced_reward, done, False, next_info
 
 
 # (JEPAEnhancedCNN class remains unchanged)
