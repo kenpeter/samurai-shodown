@@ -10,10 +10,11 @@ python train.py --enable-jepa --resume trained_models_jepa_prime/ppo_jepa_prime_
 
 
 python train.py \
-    --total-timesteps 20000000 \
+    --total-timesteps 16000000 \
     --n-steps 4096 \
     --batch-size 512 \
     --lr 0.0003 \
     --ent-coef 0.015 \
     --frame-stack 8 \
-    --render
+    --render \
+    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_4300000_steps.zip

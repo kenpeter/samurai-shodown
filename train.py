@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Training Script - VERIFIED & ROBUST
+JEPA-Enhanced Samurai Training Script - FIXED PREDICTION TIMING
 """
 import os
 import argparse
@@ -40,16 +40,23 @@ class JEPATrainingCallback(BaseCallback):
                 print(f"\n--- 📊 Training Status @ Step {self.num_timesteps:,} ---")
                 print(f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)")
 
-            # --- JEPA Accuracy Logging (The new part) ---
+            # --- JEPA Accuracy Logging (FIXED) ---
             if self.enable_jepa:
                 all_strategic_stats = self.training_env.get_attr("strategic_stats")
+                all_jepa_ready = self.training_env.get_attr("jepa_ready")
+
                 if all_strategic_stats and len(all_strategic_stats) > 0:
                     strat_stats = all_strategic_stats[0]
-                    accuracy = strat_stats.get("overall_accuracy", 0.0)
-                    predictions_made = strat_stats.get("binary_predictions_made", 0)
-                    print(
-                        f"   🔮 JEPA Accuracy: {accuracy*100:.1f}% (after {predictions_made:,} predictions)"
-                    )
+                    jepa_ready = all_jepa_ready[0] if all_jepa_ready else False
+
+                    if jepa_ready:
+                        accuracy = strat_stats.get("overall_accuracy", 0.0)
+                        predictions_made = strat_stats.get("binary_predictions_made", 0)
+                        print(
+                            f"   🔮 JEPA Accuracy: {accuracy*100:.1f}% (after {predictions_made:,} predictions)"
+                        )
+                    else:
+                        print("   🔮 JEPA: Initializing predictor...")
 
             # --- System and Training Param Logging ---
             print(
@@ -68,7 +75,6 @@ class JEPATrainingCallback(BaseCallback):
         return True
 
 
-# (The rest of train.py: make_env, main function, etc. are all unchanged and correct)
 def make_env(game, state_path, render_mode, frame_stack, enable_jepa):
     def _init():
         env = retro.make(
@@ -109,7 +115,7 @@ def main():
     args.enable_jepa = not args.no_jepa
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mode_name = "JEPA Enhanced" if args.enable_jepa else "Standard CNN"
-    print(f"🚀 Starting {mode_name} Training (Verified, Robustness & Logging Update)")
+    print(f"🚀 Starting {mode_name} Training (FIXED PREDICTION TIMING)")
     print(
         f"   💻 Device: {device.upper()}, Timesteps: {args.total_timesteps:,}, Frame Stack: {args.frame_stack}"
     )
@@ -168,10 +174,23 @@ def main():
             device=device,
         )
 
+    # FIXED: Inject feature extractor IMMEDIATELY after model creation
     if args.enable_jepa:
-        jepa_wrapper = env.envs[0].unwrapped
-        jepa_wrapper.feature_extractor = model.policy.features_extractor
-        print("   💉 Injected PPO feature extractor into JEPA wrapper.")
+        print("   💉 Injecting PPO feature extractor into JEPA wrapper...")
+        # Navigate through the DummyVecEnv -> Monitor -> SamuraiJEPAWrapper hierarchy
+        monitor_env = env.envs[0]
+        wrapper_env = monitor_env.env  # This gets us to the SamuraiJEPAWrapper
+
+        if hasattr(wrapper_env, "inject_feature_extractor"):
+            wrapper_env.inject_feature_extractor(model.policy.features_extractor)
+            print("   ✅ JEPA system fully initialized!")
+        else:
+            print(
+                f"   ⚠️ Warning: Could not find inject_feature_extractor method on {type(wrapper_env)}"
+            )
+            print(
+                f"   Available attributes: {[attr for attr in dir(wrapper_env) if not attr.startswith('_')]}"
+            )
 
     checkpoint_callback = CheckpointCallback(
         save_freq=max(50000, args.n_steps),
