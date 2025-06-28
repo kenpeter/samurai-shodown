@@ -18,7 +18,6 @@ from wrapper import SamuraiJEPAWrapper, JEPAEnhancedCNN
 
 
 class JEPATrainingCallback(BaseCallback):
-    # (No changes needed here, it's already correct for VecEnv)
     def __init__(self, enable_jepa=True, verbose=0):
         super(JEPATrainingCallback, self).__init__(verbose)
         self.enable_jepa = enable_jepa
@@ -27,21 +26,32 @@ class JEPATrainingCallback(BaseCallback):
     def _on_step(self) -> bool:
         if time.time() - self.last_log_time > 60:
             self.last_log_time = time.time()
-            all_stats = self.training_env.get_attr("current_stats")
-            if all_stats and len(all_stats) > 0:
-                stats = all_stats[0]
+
+            # --- Main Stats Logging ---
+            all_current_stats = self.training_env.get_attr("current_stats")
+            if all_current_stats and len(all_current_stats) > 0:
+                stats = all_current_stats[0]
                 wins, losses, total_rounds = (
                     stats.get("wins", 0),
                     stats.get("losses", 0),
                     stats.get("total_rounds", 0),
                 )
-                win_rate = (wins / total_rounds * 100) if total_rounds > 0 else 0
-                print(
-                    f"\n--- 📊 JEPA Training Status @ Step {self.num_timesteps:,} ---"
-                )
-                print(
-                    f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L in {total_rounds} rounds)"
-                )
+                win_rate = (wins / (wins + losses) * 100) if (wins + losses) > 0 else 0
+                print(f"\n--- 📊 Training Status @ Step {self.num_timesteps:,} ---")
+                print(f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W / {losses}L)")
+
+            # --- JEPA Accuracy Logging (The new part) ---
+            if self.enable_jepa:
+                all_strategic_stats = self.training_env.get_attr("strategic_stats")
+                if all_strategic_stats and len(all_strategic_stats) > 0:
+                    strat_stats = all_strategic_stats[0]
+                    accuracy = strat_stats.get("overall_accuracy", 0.0)
+                    predictions_made = strat_stats.get("binary_predictions_made", 0)
+                    print(
+                        f"   🔮 JEPA Accuracy: {accuracy*100:.1f}% (after {predictions_made:,} predictions)"
+                    )
+
+            # --- System and Training Param Logging ---
             print(
                 f"   🧠 Arch: {'JEPA+Transformer' if self.enable_jepa else 'Standard CNN'}"
             )
@@ -54,15 +64,12 @@ class JEPATrainingCallback(BaseCallback):
                 )
             print(f"   📈 LR: {self.model.learning_rate:.2e}")
             print("--------------------------------------------------")
+
         return True
 
 
-# *** FIX: Use a make_env helper for clean initialization ***
+# (The rest of train.py: make_env, main function, etc. are all unchanged and correct)
 def make_env(game, state_path, render_mode, frame_stack, enable_jepa):
-    """
-    Utility function to create and wrap the environment.
-    """
-
     def _init():
         env = retro.make(
             game=game,
@@ -102,7 +109,7 @@ def main():
     args.enable_jepa = not args.no_jepa
     device = "cuda" if torch.cuda.is_available() else "cpu"
     mode_name = "JEPA Enhanced" if args.enable_jepa else "Standard CNN"
-    print(f"🚀 Starting {mode_name} Training (Verified, Robustness Update)")
+    print(f"🚀 Starting {mode_name} Training (Verified, Robustness & Logging Update)")
     print(
         f"   💻 Device: {device.upper()}, Timesteps: {args.total_timesteps:,}, Frame Stack: {args.frame_stack}"
     )
@@ -115,13 +122,12 @@ def main():
     )
     print(f"   🎮 Using state: {state_path}")
 
-    # *** FIX: Create the VecEnv using the helper function ***
     render_mode = "human" if args.render else None
     env = DummyVecEnv(
         [make_env(game, state_path, render_mode, args.frame_stack, args.enable_jepa)]
     )
 
-    save_dir = "trained_models_jepa_robust"
+    save_dir = "trained_models_jepa_reward_shaped"
     os.makedirs(save_dir, exist_ok=True)
 
     policy_kwargs = dict(
@@ -163,8 +169,6 @@ def main():
         )
 
     if args.enable_jepa:
-        # *** FIX: Use a clean and reliable way to inject the extractor ***
-        # This accesses the actual env object inside the DummyVecEnv
         jepa_wrapper = env.envs[0].unwrapped
         jepa_wrapper.feature_extractor = model.policy.features_extractor
         print("   💉 Injected PPO feature extractor into JEPA wrapper.")
@@ -172,7 +176,7 @@ def main():
     checkpoint_callback = CheckpointCallback(
         save_freq=max(50000, args.n_steps),
         save_path=save_dir,
-        name_prefix="ppo_jepa_robust",
+        name_prefix="ppo_jepa_shaped",
     )
     training_callback = JEPATrainingCallback(enable_jepa=args.enable_jepa)
 

@@ -9,5 +9,12 @@ python train.py --enable-jepa --resume trained_models_jepa_prime/ppo_jepa_prime_
 
 
 
-# Resume from your 11.8M model, but with a lower LR to adapt to the new reward function
-python train.py --resume trained_models_jepa_robust/ppo_jepa_robust_11900000_steps.zip --lr 1e-4
+python train.py \
+    --total-timesteps 20000000 \
+    --n-steps 4096 \
+    --batch-size 512 \
+    --lr 0.0003 \
+    --ent-coef 0.015 \
+    --frame-stack 8 \
+    --render
+    --resume trained_models_jepa_prime/ppo_jepa_robust_3450000_steps.zip
