@@ -9,19 +9,6 @@ python train.py --enable-jepa --resume trained_models_jepa_prime/ppo_jepa_prime_
 
 
 
-python train.py \
-    --total-timesteps 1000000 \
-    --n-steps 3096 \
-    --batch-size 1024 \
-    --lr 0.0003 \
-    --ent-coef 0.015 \
-    --frame-stack 8 \
-    --render \
-    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_2450000_steps.zip
-
-
-
-
 # Quick visual check (shorter session)
 python train.py \
     --total-timesteps 5000000 \
@@ -30,7 +17,7 @@ python train.py \
     --lr 0.00025 \
     --ent-coef 0.01 \
     --frame-stack 8 \
-    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_2450000_steps.zip
+    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_3200000_steps.zip
 
 
 Input Observation: (batch, channels, height, width)
