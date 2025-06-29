@@ -59,7 +59,7 @@ class JEPAStrategicPredictor(nn.Module):
     """JEPA predictor focused on strategic attack/defense timing"""
 
     def __init__(
-        self, visual_dim=512, sequence_length=8, prediction_horizon=8, game_state_dim=10
+        self, visual_dim=512, sequence_length=8, prediction_horizon=8, game_state_dim=11
     ):
         super().__init__()
         self.prediction_horizon = prediction_horizon
@@ -301,10 +301,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     visual_dim=visual_dim,
                     sequence_length=self.state_history_length,
                     prediction_horizon=self.frame_stack,
-                    game_state_dim=10,
+                    game_state_dim=11,  # Updated from 10 to 11 for score momentum
                 ).to(self.device)
                 print(
-                    f"   🧠 Strategic JEPA Predictor initialized with visual_dim={visual_dim}"
+                    f"   🧠 Strategic JEPA Predictor initialized with visual_dim={visual_dim}, game_state_dim=11"
                 )
 
             except Exception as e:
@@ -334,12 +334,31 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             print(f"   ❌ Game activity detection error: {e}")
             return True
 
+    # game vector
     def _extract_enhanced_game_state_vector(self, info: Dict) -> np.ndarray:
-        """Extract strategic game state vector (10 features)"""
+        """Extract strategic game state vector with score momentum (11 features)"""
         try:
             player_health = info.get("health", self.prev_player_health)
             enemy_health = info.get("enemy_health", self.prev_enemy_health)
+            current_score = info.get("score", self.prev_score)
             round_num = info.get("round", 1)
+
+            # Calculate score momentum (rate of score increase)
+            score_momentum = 0.0
+            if (
+                hasattr(self, "_last_score_for_momentum")
+                and self._last_score_for_momentum is not None
+            ):
+                score_delta = current_score - self._last_score_for_momentum
+                if score_delta > 0:
+                    # Normalize score momentum using tanh to keep in reasonable range
+                    score_momentum = np.tanh(
+                        score_delta / 1000.0
+                    )  # Scale by 1000 points
+                # Handle score resets (new round/game)
+                elif score_delta < -1000:  # Large negative = reset
+                    score_momentum = 0.0
+            self._last_score_for_momentum = current_score
 
             # Strategic features for timing decisions
             f1_player_health_norm = player_health / MAX_HEALTH
@@ -353,9 +372,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             f7_enemy_is_critical = (
                 1.0 if enemy_health < CRITICAL_HEALTH_THRESHOLD else 0.0
             )
-            f8_is_round_1 = 1.0 if round_num == 1 else 0.0
-            f9_is_round_2 = 1.0 if round_num == 2 else 0.0
-            f10_is_round_3 = 1.0 if round_num >= 3 else 0.0
+            f8_score_momentum = score_momentum  # NEW: Score momentum feature
+            f9_is_round_1 = 1.0 if round_num == 1 else 0.0
+            f10_is_round_2 = 1.0 if round_num == 2 else 0.0
+            f11_is_round_3 = 1.0 if round_num >= 3 else 0.0
 
             return np.array(
                 [
@@ -366,16 +386,17 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     f5_total_health_pool,
                     f6_player_is_critical,
                     f7_enemy_is_critical,
-                    f8_is_round_1,
-                    f9_is_round_2,
-                    f10_is_round_3,
+                    f8_score_momentum,  # NEW: Indicates successful attacks/combos
+                    f9_is_round_1,
+                    f10_is_round_2,
+                    f11_is_round_3,
                 ],
                 dtype=np.float32,
             )
 
         except Exception as e:
             print(f"   ⚠️ Game state extraction failed: {e}")
-            return np.zeros(10, dtype=np.float32)
+            return np.zeros(11, dtype=np.float32)  # Updated to 11 features
 
     def _get_visual_features(self, observation: np.ndarray) -> Optional[torch.Tensor]:
         """Extract visual features with proper error handling"""
@@ -447,6 +468,9 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 f"   🔄 RESET: P:{initial_health}, E:{initial_enemy_health}, Score:{initial_score}, Round:{initial_round}"
             )
 
+            # Reset score momentum tracking
+            self._last_score_for_momentum = initial_score
+
             # Reset game state
             self.prev_player_health = initial_health
             self.prev_enemy_health = initial_enemy_health
@@ -487,7 +511,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             if self.feature_extractor is not None:
                 feature_dim = getattr(self.feature_extractor, "features_dim", 512)
                 zero_vf = torch.zeros(feature_dim, device=self.device)
-                zero_gs = np.zeros(10, dtype=np.float32)
+                zero_gs = np.zeros(11, dtype=np.float32)  # Updated to 11 features
 
                 for _ in range(self.state_history_length):
                     self.visual_features_history.append(zero_vf.clone())
@@ -570,9 +594,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 return
 
             current_info = self.env.unwrapped.data.lookup_all()
+            # game vector
             game_state_vec = self._extract_enhanced_game_state_vector(current_info)
 
-            # Update histories
+            # obs history and game history
             self.visual_features_history.append(visual_features.clone().detach())
             self.game_state_history.append(game_state_vec.copy())
 
@@ -581,6 +606,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 vf_list = list(self.visual_features_history)
                 vf_seq = torch.stack(vf_list, dim=0).unsqueeze(0)
 
+                # game history becomes game seq
                 gs_array = np.array(list(self.game_state_history))
                 gs_seq = torch.tensor(
                     gs_array, dtype=torch.float32, device=self.device
@@ -673,6 +699,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
             # Evaluate strategic predictions
             num_predictions = 0
+            # we loop obs history and game history and predict
             for key, pred_tensor in self.prediction_from_last_step.items():
                 if key in ground_truth:
                     try:
@@ -695,7 +722,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                             # print(
                             #     f"      🛡️ DEFENSE OPPORTUNITY: {result_str}, prob={predicted_prob:.3f}"
                             # )
-                            pass
 
                         # Update statistics
                         if is_correct:
@@ -793,13 +819,28 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 if my_health < MAX_HEALTH * 0.4:
                     health_reward *= 1.5
 
-            # Win/Loss Rewards
+            # Win/Loss Rewards - Fix the logic to prevent double logging
             win_loss_reward = 0.0
-            round_ended = (my_health <= 0 or enemy_health <= 0) and (
-                self.prev_player_health > 0 and self.prev_enemy_health > 0
-            )
 
-            if round_ended:
+            # Check for round end conditions - only trigger one of these
+            if my_health <= 0 and self.prev_player_health > 0:
+                # Player died
+                win_loss_reward = -5.0
+                self.enemy_wins_in_episode += 1
+                print(f"   💀 PLAYER DIED! Enemy wins: {self.enemy_wins_in_episode}")
+
+            elif enemy_health <= 0 and self.prev_enemy_health > 0:
+                # Enemy died
+                win_loss_reward = 10.0
+                self.player_wins_in_episode += 1
+                print(
+                    f"   🏆 ENEMY DEFEATED! Player wins: {self.player_wins_in_episode}"
+                )
+
+            elif (my_health <= 0 or enemy_health <= 0) and (
+                self.prev_player_health > 0 and self.prev_enemy_health > 0
+            ):
+                # General round end check (fallback)
                 if my_health > enemy_health:
                     win_loss_reward = 10.0
                     self.player_wins_in_episode += 1
@@ -812,17 +853,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     print(
                         f"   💀 ROUND LOST! Enemy wins: {self.enemy_wins_in_episode}, Player HP: {my_health}, Enemy HP: {enemy_health}"
                     )
-
-            elif my_health <= 0 and self.prev_player_health > 0:
-                win_loss_reward = -5.0
-                self.enemy_wins_in_episode += 1
-                print(f"   💀 PLAYER DIED! Enemy wins: {self.enemy_wins_in_episode}")
-            elif enemy_health <= 0 and self.prev_enemy_health > 0:
-                win_loss_reward = 10.0
-                self.player_wins_in_episode += 1
-                print(
-                    f"   🏆 ENEMY DEFEATED! Player wins: {self.player_wins_in_episode}"
-                )
 
             total_reward = (
                 survival_reward + health_reward + score_reward + win_loss_reward

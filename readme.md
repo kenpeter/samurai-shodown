@@ -17,9 +17,20 @@ python train.py \
     --ent-coef 0.015 \
     --frame-stack 8 \
     --render \
-    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_1450000_steps.zip
+    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_2450000_steps.zip
 
 
+
+
+# Quick visual check (shorter session)
+python train.py \
+    --total-timesteps 5000000 \
+    --n-steps 4096 \
+    --batch-size 512 \
+    --lr 0.00025 \
+    --ent-coef 0.01 \
+    --frame-stack 8 \
+    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_2450000_steps.zip
 
 
 Input Observation: (batch, channels, height, width)
