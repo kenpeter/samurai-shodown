@@ -313,35 +313,123 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 self.jepa_predictor = None
 
     def _is_game_active(self, info: Dict) -> bool:
-        """Detect if game is actively running or paused"""
+        """Detect if game is actively running - EXPANDED DEFINITION for better training"""
         try:
-            # Check for timer existence and movement
-            timer = info.get("timer", None)
-            if timer is not None and hasattr(self, "_last_timer"):
-                if timer != self._last_timer:
-                    self._last_timer = timer
-                    return True
-
-            # Check for health changes
+            # Get current game state
             current_player = info.get("health", self.prev_player_health)
             current_enemy = info.get("enemy_health", self.prev_enemy_health)
-
-            if (
-                current_player != self.prev_player_health
-                or current_enemy != self.prev_enemy_health
-            ):
-                return True
-
-            # Check round progression
+            current_timer = info.get("timer", None)
             current_round = info.get("round", 0)
-            if hasattr(self, "_last_round") and current_round != self._last_round:
+            current_score = info.get("score", None)
+
+            # Initialize tracking variables if not exists
+            if not hasattr(self, "_last_timer"):
+                self._last_timer = current_timer
+            if not hasattr(self, "_last_round"):
                 self._last_round = current_round
-                return True
+            if not hasattr(self, "_last_score"):
+                self._last_score = current_score
+            if not hasattr(self, "_debug_counter"):
+                self._debug_counter = 0
+            if not hasattr(self, "_last_active_frame"):
+                self._last_active_frame = 0
 
-            return False
+            # Increment debug counter
+            self._debug_counter += 1
 
-        except Exception:
+            # Check for explicit changes (traditional active detection)
+            explicit_activity = False
+            activity_reasons = []
+
+            # 1. Health changes (combat)
+            if current_player != self.prev_player_health:
+                explicit_activity = True
+                activity_reasons.append(
+                    f"Player health: {self.prev_player_health}→{current_player}"
+                )
+
+            if current_enemy != self.prev_enemy_health:
+                explicit_activity = True
+                activity_reasons.append(
+                    f"Enemy health: {self.prev_enemy_health}→{current_enemy}"
+                )
+
+            # 2. Timer/Round/Score changes
+            if current_timer is not None and current_timer != self._last_timer:
+                explicit_activity = True
+                activity_reasons.append(f"Timer: {self._last_timer}→{current_timer}")
+                self._last_timer = current_timer
+
+            if current_round != self._last_round:
+                explicit_activity = True
+                activity_reasons.append(f"Round: {self._last_round}→{current_round}")
+                self._last_round = current_round
+
+            if current_score is not None and current_score != self._last_score:
+                explicit_activity = True
+                activity_reasons.append(f"Score: {self._last_score}→{current_score}")
+                self._last_score = current_score
+
+            # 3. EXPANDED DEFINITION: Active if fight is ongoing
+            # Consider "active" if both players have health and game seems running
+            fight_ongoing = (
+                current_player > 0
+                and current_enemy > 0
+                and current_round == 0  # Still in a round
+            )
+
+            # 4. Proximity to recent activity (within 50 frames of last damage)
+            frames_since_explicit_activity = (
+                self._debug_counter - self._last_active_frame
+            )
+            near_recent_activity = frames_since_explicit_activity <= 50
+
+            # COMBINED ACTIVE DECISION
+            is_active = explicit_activity or (
+                fight_ongoing and not self._is_likely_paused()
+            )
+
+            # Update last active frame
+            if explicit_activity:
+                self._last_active_frame = self._debug_counter
+
+            # Reduced logging (every 500 frames instead of 100)
+            if self._debug_counter % 500 == 0 or explicit_activity:
+                if explicit_activity:
+                    # print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
+                    pass
+                elif is_active:
+                    print(
+                        f"   🟡 ASSUMED ACTIVE: Fight ongoing (P:{current_player}, E:{current_enemy}, R:{current_round})"
+                    )
+                else:
+                    print(f"   🔴 INACTIVE: No changes, fight_ongoing={fight_ongoing}")
+
+                # Periodic status report
+                if self._debug_counter % 1000 == 0:
+                    activity_rate = (
+                        self._last_active_frame / max(1, self._debug_counter)
+                    ) * 100
+                    print(
+                        f"   📊 Activity Summary: {activity_rate:.1f}% active over {self._debug_counter} frames"
+                    )
+
+            return is_active
+
+        except Exception as e:
+            print(f"   ❌ Game activity detection error: {e}")
             return True  # Assume active if we can't determine
+
+    def _is_likely_paused(self) -> bool:
+        """Detect if game is likely paused/stuck based on patterns"""
+        try:
+            # If we haven't seen ANY activity for a very long time, likely paused
+            if hasattr(self, "_debug_counter") and hasattr(self, "_last_active_frame"):
+                frames_since_activity = self._debug_counter - self._last_active_frame
+                return frames_since_activity > 2000  # 2000 frames without any activity
+            return False
+        except Exception:
+            return False
 
     def _extract_enhanced_game_state_vector(self, info: Dict) -> np.ndarray:
         """Extract enhanced game state with more features"""
