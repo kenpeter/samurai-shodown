@@ -14,7 +14,7 @@ from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-from wrapper import SamuraiJEPAWrapper, JEPAEnhancedCNN
+from wrapper import SamuraiJEPAWrapperImproved, JEPAEnhancedCNN
 
 
 class JEPATrainingCallback(BaseCallback):
@@ -141,7 +141,7 @@ def make_env(game, state_path, render_mode, frame_stack, enable_jepa):
                 obs_type=retro.Observations.IMAGE,
                 render_mode=render_mode,
             )
-            env = SamuraiJEPAWrapper(
+            env = SamuraiJEPAWrapperImproved(
                 env, frame_stack=frame_stack, enable_jepa=enable_jepa
             )
             env = Monitor(env)

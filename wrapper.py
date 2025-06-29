@@ -182,7 +182,7 @@ class JEPAImprovedPredictor(nn.Module):
 
 
 # --- Main Environment Wrapper ---
-class SamuraiJEPAWrapper(gym.Wrapper):
+class SamuraiJEPAWrapperImproved(gym.Wrapper):
     """Improved wrapper with better game state detection and reduced logging"""
 
     def __init__(self, env, frame_stack=8, enable_jepa=True, **kwargs):
@@ -302,7 +302,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                     visual_dim=visual_dim,
                     sequence_length=self.state_history_length,
                     prediction_horizon=self.frame_stack,
-                    game_state_dim=10,  # Expanded game state
+                    game_state_dim=15,  # Updated for enhanced features
                 ).to(self.device)
                 print(
                     f"   🧠 Improved JEPA Predictor initialized with visual_dim={visual_dim}"
@@ -396,7 +396,8 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             # Reduced logging (every 500 frames instead of 100)
             if self._debug_counter % 500 == 0 or explicit_activity:
                 if explicit_activity:
-                    print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
+                    # print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
+                    pass
                 elif is_active:
                     print(
                         f"   🟡 ASSUMED ACTIVE: Fight ongoing (P:{current_player}, E:{current_enemy}, R:{current_round})"
@@ -431,23 +432,68 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             return False
 
     def _extract_enhanced_game_state_vector(self, info: Dict) -> np.ndarray:
-        """Extract enhanced game state with more features"""
+        """Extract enhanced game state with verified available features only"""
         try:
             player_health = info.get("health", self.prev_player_health)
             enemy_health = info.get("enemy_health", self.prev_enemy_health)
             round_num = info.get("round", 1)
             timer = info.get("timer", 99)
+            score = info.get("score", 0)
 
-            # Calculate health momentum
+            # Calculate health momentum (rate of change) - FIX: Store tuples not arrays
             health_momentum_player = 0.0
             health_momentum_enemy = 0.0
             if len(self.health_history) > 1:
-                prev_healths = self.health_history[-1]
-                health_momentum_player = (player_health - prev_healths[0]) / MAX_HEALTH
-                health_momentum_enemy = (enemy_health - prev_healths[1]) / MAX_HEALTH
+                prev_player_health, prev_enemy_health = self.health_history[
+                    -1
+                ]  # Unpack tuple
+                health_momentum_player = (
+                    player_health - prev_player_health
+                ) / MAX_HEALTH
+                health_momentum_enemy = (enemy_health - prev_enemy_health) / MAX_HEALTH
 
-            # Store current health for next calculation
+            # Store current health as tuple (not array) for next calculation
             self.health_history.append((player_health, enemy_health))
+
+            # Calculate score momentum (rate of score increase)
+            score_momentum = 0.0
+            if (
+                hasattr(self, "_last_score_for_momentum")
+                and self._last_score_for_momentum is not None
+            ):
+                score_momentum = (
+                    score - self._last_score_for_momentum
+                ) / 1000.0  # Normalize score changes
+            self._last_score_for_momentum = score
+
+            # Calculate action momentum from action history - FIX: Convert arrays to hashable
+            recent_action_variety = 0.0
+            if len(self.action_history) >= 3:
+                recent_actions = list(self.action_history)[-3:]
+                # Convert numpy arrays to tuples or ints for hashing
+                hashable_actions = []
+                for action in recent_actions:
+                    if isinstance(action, np.ndarray):
+                        # Convert array to tuple for hashing
+                        hashable_actions.append(tuple(action.flatten()))
+                    elif hasattr(action, "item"):  # scalar numpy types
+                        hashable_actions.append(action.item())
+                    else:
+                        hashable_actions.append(action)
+
+                unique_actions = len(set(hashable_actions))
+                recent_action_variety = (
+                    unique_actions / 3.0
+                )  # Variety in recent actions
+
+            # Health-based tactical features
+            health_ratio = player_health / max(1, enemy_health)  # Who has advantage
+            health_sum = (player_health + enemy_health) / (
+                2 * MAX_HEALTH
+            )  # Total health remaining
+            health_urgency = (
+                1.0 - min(player_health, enemy_health) / MAX_HEALTH
+            )  # How urgent the fight is
 
             return np.array(
                 [
@@ -460,17 +506,26 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                         1.0 if player_health < (MAX_HEALTH * 0.3) else 0.0
                     ),  # Player critical
                     1.0 if enemy_health < (MAX_HEALTH * 0.3) else 0.0,  # Enemy critical
-                    abs(player_health - enemy_health)
-                    / MAX_HEALTH,  # Health gap magnitude
                     health_momentum_player,  # Player health change rate
                     health_momentum_enemy,  # Enemy health change rate
+                    score_momentum,  # Score change rate (indicates successful attacks)
+                    recent_action_variety,  # Variety in recent actions
+                    health_ratio,  # Health advantage ratio
+                    health_sum,  # Total health remaining in fight
+                    health_urgency,  # How critical the fight state is
+                    (
+                        1.0 if abs(health_momentum_player) > 0.01 else 0.0
+                    ),  # Player recently damaged flag
                 ],
                 dtype=np.float32,
             )
 
         except Exception as e:
             print(f"   ⚠️ Enhanced game state extraction failed: {e}")
-            return np.zeros(10, dtype=np.float32)
+            import traceback
+
+            print(f"   Full traceback: {traceback.format_exc()}")
+            return np.zeros(15, dtype=np.float32)
 
     def _get_visual_features(self, observation: np.ndarray) -> Optional[torch.Tensor]:
         """Extract visual features with proper error handling"""
@@ -561,7 +616,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             if self.feature_extractor is not None:
                 feature_dim = getattr(self.feature_extractor, "features_dim", 512)
                 zero_vf = torch.zeros(feature_dim, device=self.device)
-                zero_gs = np.zeros(10, dtype=np.float32)  # Updated for enhanced state
+                zero_gs = np.zeros(15, dtype=np.float32)  # Updated for enhanced state
 
                 for _ in range(self.state_history_length):
                     self.visual_features_history.append(zero_vf.clone())
@@ -692,6 +747,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 self.damage_stats["enemy_damage_frames"] += 1
 
             # Define ground truth
+            # Define ground truth with original labels
             ground_truth = {
                 "will_opponent_attack": float(damage_to_player > 1),
                 "will_opponent_take_damage": float(damage_to_enemy > 1),
