@@ -63,12 +63,13 @@ class JEPAStrategicPredictor(nn.Module):
     ):
         super().__init__()
         self.prediction_horizon = prediction_horizon
+        # best time attack or defend
         self.strategic_outcomes = [
             "is_best_time_to_attack",
             "is_best_time_to_defend",
         ]
 
-        # Enhanced feature encoding with residual connections
+        # visual network
         feature_dim = 256
         self.context_encoder = nn.Sequential(
             nn.Linear(visual_dim, feature_dim),
@@ -80,6 +81,7 @@ class JEPAStrategicPredictor(nn.Module):
             nn.ReLU(),
         )
 
+        # game state network (also from 11 health features)
         self.game_state_encoder = nn.Sequential(
             nn.Linear(game_state_dim, feature_dim),
             nn.LayerNorm(feature_dim),
@@ -94,6 +96,7 @@ class JEPAStrategicPredictor(nn.Module):
         d_model = feature_dim * 2
         self.pos_encoder = PositionalEncoding(d_model, dropout=0.15)
 
+        # lego brick
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=8,
@@ -103,9 +106,10 @@ class JEPAStrategicPredictor(nn.Module):
             norm_first=True,
             activation="gelu",
         )
+        # lego tower
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=4)
 
-        # Specialized prediction heads for strategic decisions
+        # dict has best time to attack or defend
         self.strategic_predictors = nn.ModuleDict()
 
         # Attack timing predictor - more complex for aggressive decisions
@@ -147,7 +151,7 @@ class JEPAStrategicPredictor(nn.Module):
             sequence_input = torch.cat([visual_context, game_context], dim=-1)
             sequence_input = self.pos_encoder(sequence_input)
 
-            # Apply transformer
+            # visual encoder and game state encorder feed to transfomer to find relationship
             transformer_out = self.transformer_encoder(sequence_input)
 
             # Use attention pooling for strategic decisions
@@ -156,9 +160,11 @@ class JEPAStrategicPredictor(nn.Module):
             ).unsqueeze(-1)
 
             # Weighted average of all timesteps
+            # it is loop
             final_representation = torch.sum(transformer_out * attention_weights, dim=1)
 
             # Generate strategic predictions
+            # now make decision
             strategic_predictions = {}
             for outcome, predictor in self.strategic_predictors.items():
                 logits = predictor(final_representation)
@@ -594,7 +600,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 return
 
             current_info = self.env.unwrapped.data.lookup_all()
-            # game vector
+            # game vector (all those health info etc)
             game_state_vec = self._extract_enhanced_game_state_vector(current_info)
 
             # obs history and game history
@@ -608,6 +614,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
                 # game history becomes game seq
                 gs_array = np.array(list(self.game_state_history))
+                # (batch_size, seq_len, game_state_dim) -> (1, 8, 11), transformer can process this
                 gs_seq = torch.tensor(
                     gs_array, dtype=torch.float32, device=self.device
                 ).unsqueeze(0)
