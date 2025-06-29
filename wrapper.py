@@ -21,10 +21,10 @@ ACCURACY_LEARNING_RATE = 0.001
 
 # Individual thresholds for better prediction accuracy
 PREDICTION_THRESHOLDS = {
-    "will_opponent_attack": 0.5,
+    "will_opponent_attack": 0.7,  # Increased - model overpredicts
     "will_opponent_take_damage": 0.5,
-    "will_player_take_damage": 0.2,  # Lower threshold since model is too conservative
-    "will_round_end_soon": 0.4,  # Slightly lower threshold
+    "will_player_take_damage": 0.8,  # Much higher - damage is extremely rare (0.05% rate)
+    "will_round_end_soon": 0.6,  # Increased - model overpredicts
 }
 
 
@@ -518,26 +518,100 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             self.prediction_from_last_step = None
 
     def _evaluate_prediction_accuracy(self, next_info: Dict):
-        """Evaluate individual JEPA prediction accuracies only"""
+        """Evaluate individual JEPA prediction accuracies with detailed damage analysis and adaptive thresholds"""
         try:
             player_health_after = next_info.get("health", self.prev_player_health)
             enemy_health_after = next_info.get("enemy_health", self.prev_enemy_health)
 
-            # Calculate actual outcomes
+            # Calculate actual outcomes - FIXED TIMING
             damage_to_enemy = max(0, self.prev_enemy_health - enemy_health_after)
             damage_to_player = max(0, self.prev_player_health - player_health_after)
+
+            # DETAILED DAMAGE TRACKING for will_player_take_damage
+            player_damage_occurred = float(damage_to_player > 1)
+
+            # Track damage statistics with improved analysis
+            if not hasattr(self, "damage_stats"):
+                self.damage_stats = {
+                    "total_frames": 0,
+                    "player_damage_frames": 0,
+                    "enemy_damage_frames": 0,
+                    "damage_amounts": [],
+                    "recent_damages": [],
+                    "false_positives": 0,  # Predicted damage when none occurred
+                    "true_positives": 0,  # Predicted damage when it occurred
+                    "false_negatives": 0,  # Missed actual damage
+                    "true_negatives": 0,  # Correctly predicted no damage
+                }
+
+            self.damage_stats["total_frames"] += 1
+            if damage_to_player > 1:
+                self.damage_stats["player_damage_frames"] += 1
+                self.damage_stats["damage_amounts"].append(damage_to_player)
+                self.damage_stats["recent_damages"].append(
+                    {
+                        "frame": self.damage_stats["total_frames"],
+                        "damage": damage_to_player,
+                        "prev_health": self.prev_player_health,
+                        "new_health": player_health_after,
+                    }
+                )
+                # Keep only last 10 damage events
+                if len(self.damage_stats["recent_damages"]) > 10:
+                    self.damage_stats["recent_damages"].pop(0)
+
+            if damage_to_enemy > 1:
+                self.damage_stats["enemy_damage_frames"] += 1
+
+            # CRITICAL DEBUG: Only log every 500 predictions to reduce spam
+            if self.strategic_stats["binary_predictions_made"] % 500 == 0:
+                print(
+                    f"\n   🕹️ GAME STATE DEBUG (prediction #{self.strategic_stats['binary_predictions_made']}):"
+                )
+                try:
+                    raw_info = self.env.unwrapped.data.lookup_all()
+                    print(f"      Raw game data keys: {list(raw_info.keys())}")
+                    print(
+                        f"      Health values: player={raw_info.get('health', 'N/A')}, enemy={raw_info.get('enemy_health', 'N/A')}"
+                    )
+                    print(
+                        f"      Round info: round={raw_info.get('round', 'N/A')}, timer={raw_info.get('timer', 'N/A')}"
+                    )
+                except Exception as e:
+                    print(f"      ❌ Failed to read game data: {e}")
+
+                print(
+                    f"      Health tracking: prev_player={self.prev_player_health}, prev_enemy={self.prev_enemy_health}"
+                )
+                print(
+                    f"      Current: player={player_health_after}, enemy={enemy_health_after}"
+                )
+                print(
+                    f"      Calculated damage: to_player={damage_to_player}, to_enemy={damage_to_enemy}"
+                )
+
+                # Check if health values are even changing
+                health_changed = (player_health_after != self.prev_player_health) or (
+                    enemy_health_after != self.prev_enemy_health
+                )
+                print(f"      Health changed this step: {health_changed}")
+
+                if not health_changed:
+                    print(
+                        f"      ⚠️ WARNING: No health changes detected - check if game is stuck or paused!"
+                    )
 
             ground_truth = {
                 "will_opponent_attack": float(damage_to_player > 1),
                 "will_opponent_take_damage": float(damage_to_enemy > 1),
-                "will_player_take_damage": float(damage_to_player > 1),
+                "will_player_take_damage": player_damage_occurred,
                 "will_round_end_soon": float(
                     player_health_after < (MAX_HEALTH * 0.2)
                     or enemy_health_after < (MAX_HEALTH * 0.2)
                 ),
             }
 
-            # Calculate individual accuracy only
+            # Calculate individual accuracy with adaptive thresholds
             num_predictions = 0
             individual_results = {}
 
@@ -545,8 +619,28 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                 if key in ground_truth:
                     try:
                         predicted_prob = pred_tensor[0, 0].item()
-                        # Use individual thresholds for better accuracy
-                        threshold = PREDICTION_THRESHOLDS.get(key, PREDICTION_THRESHOLD)
+
+                        # Use adaptive thresholds based on observed rates
+                        if key == "will_player_take_damage":
+                            # Dynamically adjust threshold based on observed damage rate
+                            observed_damage_rate = self.damage_stats[
+                                "player_damage_frames"
+                            ] / max(1, self.damage_stats["total_frames"])
+                            if (
+                                observed_damage_rate < 0.001
+                            ):  # Less than 0.1% damage rate
+                                threshold = (
+                                    0.9  # Very high threshold for extremely rare events
+                                )
+                            elif (
+                                observed_damage_rate < 0.01
+                            ):  # Less than 1% damage rate
+                                threshold = 0.8
+                            else:
+                                threshold = PREDICTION_THRESHOLDS.get(key, 0.5)
+                        else:
+                            threshold = PREDICTION_THRESHOLDS.get(key, 0.5)
+
                         predicted_label = 1 if predicted_prob > threshold else 0
                         actual_label = int(ground_truth[key])
 
@@ -558,6 +652,33 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                             "probability": predicted_prob,
                             "threshold_used": threshold,
                         }
+
+                        # Track confusion matrix for damage predictions
+                        if key == "will_player_take_damage":
+                            if predicted_label == 1 and actual_label == 1:
+                                self.damage_stats["true_positives"] += 1
+                            elif predicted_label == 1 and actual_label == 0:
+                                self.damage_stats["false_positives"] += 1
+                            elif predicted_label == 0 and actual_label == 1:
+                                self.damage_stats["false_negatives"] += 1
+                            else:
+                                self.damage_stats["true_negatives"] += 1
+
+                            # REDUCED LOGGING: Only log when there's actual damage or high confidence wrong predictions
+                            if actual_label == 1:  # Actual damage occurred
+                                result_str = "✅ CORRECT" if is_correct else "❌ MISSED"
+                                print(
+                                    f"      🎯 ACTUAL DAMAGE: prob={predicted_prob:.3f}, pred={predicted_label}, actual={actual_label} ({result_str})"
+                                )
+                                print(
+                                    f"          → Player took {damage_to_player} damage ({self.prev_player_health}→{player_health_after})"
+                                )
+                            elif (
+                                predicted_prob > 0.8
+                            ):  # High confidence wrong prediction
+                                print(
+                                    f"      🎯 HIGH CONFIDENCE WRONG: prob={predicted_prob:.3f}, pred={predicted_label}, actual={actual_label} (❌ FALSE ALARM)"
+                                )
 
                         if is_correct:
                             self.strategic_stats["individual_correct"][key] += 1
@@ -581,8 +702,8 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             if num_predictions > 0:
                 self.strategic_stats["binary_predictions_made"] += 1
 
-                # Debug logging every 100 predictions with more details
-                if self.strategic_stats["binary_predictions_made"] % 100 == 0:
+                # Debug logging every 500 predictions with enhanced analysis
+                if self.strategic_stats["binary_predictions_made"] % 500 == 0:
                     print(
                         f"\n   🎯 JEPA Individual Accuracies (after {self.strategic_stats['binary_predictions_made']} predictions):"
                     )
@@ -595,24 +716,74 @@ class SamuraiJEPAWrapper(gym.Wrapper):
                         total_correct = self.strategic_stats["individual_correct"][
                             outcome
                         ]
-                        threshold = PREDICTION_THRESHOLDS.get(
-                            outcome, PREDICTION_THRESHOLD
+
+                        # Get current threshold (may be adaptive)
+                        if outcome == "will_player_take_damage":
+                            observed_damage_rate = self.damage_stats[
+                                "player_damage_frames"
+                            ] / max(1, self.damage_stats["total_frames"])
+                            if observed_damage_rate < 0.001:
+                                threshold = 0.9
+                            elif observed_damage_rate < 0.01:
+                                threshold = 0.8
+                            else:
+                                threshold = PREDICTION_THRESHOLDS.get(outcome, 0.5)
+                        else:
+                            threshold = PREDICTION_THRESHOLDS.get(outcome, 0.5)
+
+                        if total_preds > 0:
+                            if accuracy < 0.3:  # Very low accuracy
+                                predicted_positive_rate = sum(
+                                    1
+                                    for pred in individual_results.values()
+                                    if pred.get("predicted") == 1 and outcome in pred
+                                ) / max(1, len(individual_results))
+                                print(
+                                    f"      {outcome}: {accuracy*100:.1f}% ({total_correct}/{total_preds}) [thresh={threshold:.1f}] ⚠️ PPR: {predicted_positive_rate*100:.1f}%"
+                                )
+                            else:
+                                print(
+                                    f"      {outcome}: {accuracy*100:.1f}% ({total_correct}/{total_preds}) [thresh={threshold:.1f}]"
+                                )
+
+                    # Enhanced damage analysis
+                    if self.damage_stats["total_frames"] > 100:
+                        total_frames = self.damage_stats["total_frames"]
+                        player_damage_rate = (
+                            self.damage_stats["player_damage_frames"]
+                            / total_frames
+                            * 100
                         )
-                        print(
-                            f"      {outcome}: {accuracy*100:.1f}% ({total_correct}/{total_preds}) [thresh={threshold}]"
+                        enemy_damage_rate = (
+                            self.damage_stats["enemy_damage_frames"]
+                            / total_frames
+                            * 100
                         )
 
-                    # Show current prediction details for debugging
-                    if individual_results:
-                        print("   🔍 Current Step Predictions:")
-                        for key, result in individual_results.items():
-                            prob = result["probability"]
-                            pred = result["predicted"]
-                            actual = result["actual"]
-                            correct = "✅" if result["correct"] else "❌"
-                            print(
-                                f"      {key}: prob={prob:.3f} → pred={pred}, actual={actual} {correct}"
-                            )
+                        print(f"\n   🩺 DAMAGE ANALYSIS:")
+                        print(
+                            f"      Player damage rate: {player_damage_rate:.3f}% ({self.damage_stats['player_damage_frames']}/{total_frames})"
+                        )
+                        print(
+                            f"      Enemy damage rate: {enemy_damage_rate:.3f}% ({self.damage_stats['enemy_damage_frames']}/{total_frames})"
+                        )
+
+                        # Confusion matrix for player damage
+                        tp = self.damage_stats["true_positives"]
+                        fp = self.damage_stats["false_positives"]
+                        fn = self.damage_stats["false_negatives"]
+                        tn = self.damage_stats["true_negatives"]
+
+                        precision = tp / max(1, tp + fp)
+                        recall = tp / max(1, tp + fn)
+                        specificity = tn / max(1, tn + fp)
+
+                        print(f"      Player Damage Prediction Stats:")
+                        print(f"        True Positives: {tp}, False Positives: {fp}")
+                        print(f"        False Negatives: {fn}, True Negatives: {tn}")
+                        print(
+                            f"        Precision: {precision:.3f}, Recall: {recall:.3f}, Specificity: {specificity:.3f}"
+                        )
 
         except Exception as e:
             print(f"   ⚠️ Prediction accuracy evaluation failed: {e}")
