@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Showdown Wrapper - PERFORMANCE IMPROVEMENTS
+JEPA-Enhanced Samurai Showdown Wrapper - STRATEGIC PREDICTIONS
 """
 import math
 import cv2
@@ -17,15 +17,13 @@ from typing import Dict, Optional, Tuple
 # --- Constants ---
 MAX_HEALTH = 176
 PREDICTION_THRESHOLD = 0.5
-ACCURACY_LEARNING_RATE = 0.01  # Increased for faster adaptation
+ACCURACY_LEARNING_RATE = 0.01
 CRITICAL_HEALTH_THRESHOLD = MAX_HEALTH * 0.3
 
-# Adaptive thresholds based on observed patterns
+# Adaptive thresholds for strategic predictions
 PREDICTION_THRESHOLDS = {
-    "will_opponent_attack": 0.55,  # Lowered - model shows ~52% confidence
-    "will_opponent_take_damage": 0.5,
-    "will_player_take_damage": 0.55,  # Lowered to catch more events
-    "will_round_end_soon": 0.6,
+    "is_best_time_to_attack": 0.6,
+    "is_best_time_to_defend": 0.55,
 }
 
 # Minimum confidence for logging to reduce spam
@@ -57,23 +55,21 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 
-class JEPAImprovedPredictor(nn.Module):
-    """Improved JEPA predictor with better learning signals"""
+class JEPAStrategicPredictor(nn.Module):
+    """JEPA predictor focused on strategic attack/defense timing"""
 
     def __init__(
         self, visual_dim=512, sequence_length=8, prediction_horizon=8, game_state_dim=10
     ):
         super().__init__()
         self.prediction_horizon = prediction_horizon
-        self.binary_outcomes = [
-            "will_opponent_attack",
-            "will_opponent_take_damage",
-            "will_player_take_damage",
-            "will_round_end_soon",
+        self.strategic_outcomes = [
+            "is_best_time_to_attack",
+            "is_best_time_to_defend",
         ]
 
         # Enhanced feature encoding with residual connections
-        feature_dim = 256  # Increased capacity
+        feature_dim = 256
         self.context_encoder = nn.Sequential(
             nn.Linear(visual_dim, feature_dim),
             nn.LayerNorm(feature_dim),
@@ -94,50 +90,52 @@ class JEPAImprovedPredictor(nn.Module):
             nn.ReLU(),
         )
 
-        # Improved transformer architecture
+        # Strategic transformer architecture
         d_model = feature_dim * 2
         self.pos_encoder = PositionalEncoding(d_model, dropout=0.15)
 
         encoder_layers = nn.TransformerEncoderLayer(
             d_model=d_model,
-            nhead=8,  # More attention heads
-            dim_feedforward=d_model * 4,  # Larger feedforward
+            nhead=8,
+            dim_feedforward=d_model * 4,
             dropout=0.15,
             batch_first=True,
             norm_first=True,
-            activation="gelu",  # Better activation
+            activation="gelu",
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=4)
 
-        # Specialized prediction heads with different architectures
-        self.binary_predictors = nn.ModuleDict()
-        for outcome in self.binary_outcomes:
-            # Different architecture based on prediction difficulty
-            if outcome == "will_player_take_damage":
-                # More complex head for rare damage events
-                self.binary_predictors[outcome] = nn.Sequential(
-                    nn.Linear(d_model, 128),
-                    nn.LayerNorm(128),
-                    nn.GELU(),
-                    nn.Dropout(0.2),
-                    nn.Linear(128, 64),
-                    nn.LayerNorm(64),
-                    nn.GELU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(64, prediction_horizon),
-                )
-            else:
-                # Standard head for other predictions
-                self.binary_predictors[outcome] = nn.Sequential(
-                    nn.Linear(d_model, 96),
-                    nn.LayerNorm(96),
-                    nn.GELU(),
-                    nn.Dropout(0.1),
-                    nn.Linear(96, prediction_horizon),
-                )
+        # Specialized prediction heads for strategic decisions
+        self.strategic_predictors = nn.ModuleDict()
+
+        # Attack timing predictor - more complex for aggressive decisions
+        self.strategic_predictors["is_best_time_to_attack"] = nn.Sequential(
+            nn.Linear(d_model, 128),
+            nn.LayerNorm(128),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(128, 64),
+            nn.LayerNorm(64),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(64, prediction_horizon),
+        )
+
+        # Defense timing predictor - focused on safety
+        self.strategic_predictors["is_best_time_to_defend"] = nn.Sequential(
+            nn.Linear(d_model, 96),
+            nn.LayerNorm(96),
+            nn.GELU(),
+            nn.Dropout(0.15),
+            nn.Linear(96, 48),
+            nn.LayerNorm(48),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(48, prediction_horizon),
+        )
 
     def forward(self, visual_features_seq, game_state_features_seq):
-        """Forward pass with improved gradient flow"""
+        """Forward pass focused on strategic timing predictions"""
         try:
             batch_size, seq_len = visual_features_seq.shape[:2]
 
@@ -149,10 +147,10 @@ class JEPAImprovedPredictor(nn.Module):
             sequence_input = torch.cat([visual_context, game_context], dim=-1)
             sequence_input = self.pos_encoder(sequence_input)
 
-            # Apply transformer with gradient checkpointing for memory efficiency
+            # Apply transformer
             transformer_out = self.transformer_encoder(sequence_input)
 
-            # Use attention pooling instead of just last timestep
+            # Use attention pooling for strategic decisions
             attention_weights = torch.softmax(
                 torch.sum(transformer_out, dim=-1), dim=1
             ).unsqueeze(-1)
@@ -160,31 +158,31 @@ class JEPAImprovedPredictor(nn.Module):
             # Weighted average of all timesteps
             final_representation = torch.sum(transformer_out * attention_weights, dim=1)
 
-            # Generate predictions with temperature scaling
-            binary_predictions = {}
-            for outcome, predictor in self.binary_predictors.items():
+            # Generate strategic predictions
+            strategic_predictions = {}
+            for outcome, predictor in self.strategic_predictors.items():
                 logits = predictor(final_representation)
-                # Temperature scaling for better calibration
-                temperature = 1.2 if outcome == "will_player_take_damage" else 1.0
-                binary_predictions[outcome] = torch.sigmoid(logits / temperature)
+                # Different temperature scaling for attack vs defense
+                temperature = 1.1 if outcome == "is_best_time_to_attack" else 1.0
+                strategic_predictions[outcome] = torch.sigmoid(logits / temperature)
 
-            return binary_predictions
+            return strategic_predictions
 
         except Exception as e:
-            print(f"⚠️ JEPA prediction error: {e}")
+            print(f"⚠️ JEPA strategic prediction error: {e}")
             device = visual_features_seq.device
             batch_size = visual_features_seq.size(0)
             return {
                 outcome: torch.full(
                     (batch_size, self.prediction_horizon), 0.5, device=device
                 )
-                for outcome in self.binary_outcomes
+                for outcome in self.strategic_outcomes
             }
 
 
 # --- Main Environment Wrapper ---
 class SamuraiJEPAWrapperImproved(gym.Wrapper):
-    """Improved wrapper with better game state detection and reduced logging"""
+    """Improved wrapper with strategic attack/defense predictions"""
 
     def __init__(self, env, frame_stack=8, enable_jepa=True, **kwargs):
         super().__init__(env)
@@ -207,9 +205,9 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
         # Enhanced game state tracking
         self.prev_player_health = MAX_HEALTH
         self.prev_enemy_health = MAX_HEALTH
-        self.prev_score = 0  # Added for enhanced reward calculation
-        self.health_history = deque(maxlen=10)  # Track health changes over time
-        self.action_history = deque(maxlen=5)  # Track recent actions
+        self.prev_score = 0
+        self.health_history = deque(maxlen=10)
+        self.action_history = deque(maxlen=5)
 
         self.player_wins_in_episode = 0
         self.enemy_wins_in_episode = 0
@@ -223,27 +221,32 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
         }
 
         self.strategic_stats = {
-            "binary_predictions_made": 0,
+            "strategic_predictions_made": 0,
             "game_active_frames": 0,
             "game_paused_frames": 0,
-            "individual_accuracies": {
-                "will_opponent_attack": 0.5,
-                "will_opponent_take_damage": 0.5,
-                "will_player_take_damage": 0.5,
-                "will_round_end_soon": 0.5,
+            "strategic_accuracies": {
+                "is_best_time_to_attack": 0.5,
+                "is_best_time_to_defend": 0.5,
             },
-            "individual_predictions": {
-                "will_opponent_attack": 0,
-                "will_opponent_take_damage": 0,
-                "will_player_take_damage": 0,
-                "will_round_end_soon": 0,
+            "strategic_predictions": {
+                "is_best_time_to_attack": 0,
+                "is_best_time_to_defend": 0,
             },
-            "individual_correct": {
-                "will_opponent_attack": 0,
-                "will_opponent_take_damage": 0,
-                "will_player_take_damage": 0,
-                "will_round_end_soon": 0,
+            "strategic_correct": {
+                "is_best_time_to_attack": 0,
+                "is_best_time_to_defend": 0,
             },
+        }
+
+        # Strategic decision tracking
+        self.strategic_decision_stats = {
+            "attack_opportunities": 0,
+            "successful_attacks": 0,
+            "attack_success_rate": 0.0,
+            "defense_opportunities": 0,
+            "successful_defenses": 0,
+            "defense_success_rate": 0.0,
+            "recent_decisions": deque(maxlen=50),
         }
 
         # JEPA system initialization
@@ -252,33 +255,27 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             self._initialize_jepa_system()
 
         print(
-            f"🥷 JEPA Wrapper Improved: Enhanced Learning & Reduced Logging, Frame Stack={self.frame_stack}"
+            f"🥷 JEPA Wrapper Strategic: Attack/Defense Timing Predictions, Frame Stack={self.frame_stack}"
         )
 
     def _initialize_jepa_system(self):
         """Initialize JEPA-related components"""
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.feature_extractor: Optional[nn.Module] = None
-        self.jepa_predictor: Optional[JEPAImprovedPredictor] = None
+        self.jepa_predictor: Optional[JEPAStrategicPredictor] = None
 
         # History buffers
         self.visual_features_history = deque(maxlen=self.state_history_length)
         self.game_state_history = deque(maxlen=self.state_history_length)
         self.prediction_from_last_step: Optional[Dict] = None
 
-        # Enhanced damage tracking
-        self.damage_stats = {
+        # Strategic timing tracking
+        self.strategic_timing_stats = {
             "total_frames": 0,
-            "player_damage_frames": 0,
-            "enemy_damage_frames": 0,
-            "damage_amounts": [],
-            "recent_damages": [],
-            "false_positives": 0,
-            "true_positives": 0,
-            "false_negatives": 0,
-            "true_negatives": 0,
-            "last_damage_frame": -1000,
-            "damage_intervals": [],
+            "attack_frames": 0,
+            "defense_frames": 0,
+            "successful_attack_predictions": 0,
+            "successful_defense_predictions": 0,
         }
 
     def inject_feature_extractor(self, feature_extractor: nn.Module):
@@ -290,24 +287,24 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             self.feature_extractor = feature_extractor
             self._initialize_jepa_predictor(feature_extractor.features_dim)
             self.jepa_ready = True
-            print("   ✅ Feature extractor injected and JEPA predictor initialized!")
+            print("   ✅ Strategic JEPA predictor initialized!")
 
         except Exception as e:
             print(f"   ❌ JEPA injection failed: {e}")
             self.jepa_ready = False
 
     def _initialize_jepa_predictor(self, visual_dim: int):
-        """Initialize improved JEPA predictor"""
+        """Initialize strategic JEPA predictor"""
         if self.jepa_predictor is None:
             try:
-                self.jepa_predictor = JEPAImprovedPredictor(
+                self.jepa_predictor = JEPAStrategicPredictor(
                     visual_dim=visual_dim,
                     sequence_length=self.state_history_length,
                     prediction_horizon=self.frame_stack,
-                    game_state_dim=10,  # Updated to match new simplified state vector
+                    game_state_dim=10,
                 ).to(self.device)
                 print(
-                    f"   🧠 Improved JEPA Predictor initialized with visual_dim={visual_dim}, game_state_dim=10"
+                    f"   🧠 Strategic JEPA Predictor initialized with visual_dim={visual_dim}"
                 )
 
             except Exception as e:
@@ -315,22 +312,18 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 self.jepa_predictor = None
 
     def _is_game_active(self, info: Dict) -> bool:
-        """Simplified game activity detection - assume most frames are active for better training"""
+        """Simplified game activity detection"""
         try:
             current_player = info.get("health", self.prev_player_health)
             current_enemy = info.get("enemy_health", self.prev_enemy_health)
 
-            # Initialize counters
             if not hasattr(self, "_debug_counter"):
                 self._debug_counter = 0
             self._debug_counter += 1
 
-            # Much more permissive activity detection for better training
-            # Consider active if both players have health (fight is possible)
             is_active = current_player > 0 and current_enemy > 0
 
-            # Minimal logging to reduce spam
-            if self._debug_counter % 2000 == 0:  # Every 2000 frames
+            if self._debug_counter % 2000 == 0:
                 print(
                     f"   🎮 Game Status: P:{current_player}, E:{current_enemy}, Active:{is_active}"
                 )
@@ -339,69 +332,40 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
         except Exception as e:
             print(f"   ❌ Game activity detection error: {e}")
-            return True  # Default to active
-
-    def _is_likely_paused(self) -> bool:
-        """Detect if game is likely paused/stuck based on patterns"""
-        try:
-            # If we haven't seen ANY activity for a very long time, likely paused
-            if hasattr(self, "_debug_counter") and hasattr(self, "_last_active_frame"):
-                frames_since_activity = self._debug_counter - self._last_active_frame
-                return frames_since_activity > 2000  # 2000 frames without any activity
-            return False
-        except Exception:
-            return False
+            return True
 
     def _extract_enhanced_game_state_vector(self, info: Dict) -> np.ndarray:
-        """Extract simplified but powerful game state vector (10 features)"""
+        """Extract strategic game state vector (10 features)"""
         try:
-            # 1. health, enemy health, round
             player_health = info.get("health", self.prev_player_health)
             enemy_health = info.get("enemy_health", self.prev_enemy_health)
             round_num = info.get("round", 1)
 
-            # 2. Derive Relational and Contextual Features
-            # Feature 1 & 2: each one's health
+            # Strategic features for timing decisions
             f1_player_health_norm = player_health / MAX_HEALTH
             f2_enemy_health_norm = enemy_health / MAX_HEALTH
-
-            # Feature 3: who is winning
             f3_health_advantage = (player_health - enemy_health) / MAX_HEALTH
-
-            # Feature 4: Health Ratio (How dominant is the advantage?)
             f4_health_ratio = player_health / (enemy_health + 1e-6)
-
-            # Feature 5: Total Fight Progress (Is the fight ending?)
             f5_total_health_pool = (player_health + enemy_health) / (2 * MAX_HEALTH)
-
-            # Feature 6 & 7: Critical State Flags (Is someone in danger?)
             f6_player_is_critical = (
                 1.0 if player_health < CRITICAL_HEALTH_THRESHOLD else 0.0
             )
             f7_enemy_is_critical = (
                 1.0 if enemy_health < CRITICAL_HEALTH_THRESHOLD else 0.0
             )
-
-            # Feature 8, 9, 10: Round (One-Hot Encoded)
             f8_is_round_1 = 1.0 if round_num == 1 else 0.0
             f9_is_round_2 = 1.0 if round_num == 2 else 0.0
             f10_is_round_3 = 1.0 if round_num >= 3 else 0.0
 
             return np.array(
                 [
-                    # each one's health
                     f1_player_health_norm,
                     f2_enemy_health_norm,
-                    # who is winning
                     f3_health_advantage,
-                    # how dominate the health
                     f4_health_ratio,
-                    # fight progress
                     f5_total_health_pool,
-                    # who is in critical
                     f6_player_is_critical,
                     f7_enemy_is_critical,
-                    # 3 rounds
                     f8_is_round_1,
                     f9_is_round_2,
                     f10_is_round_3,
@@ -410,10 +374,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             )
 
         except Exception as e:
-            print(f"   ⚠️ Enhanced game state extraction failed: {e}")
-            import traceback
-
-            print(f"   Full traceback: {traceback.format_exc()}")
+            print(f"   ⚠️ Game state extraction failed: {e}")
             return np.zeros(10, dtype=np.float32)
 
     def _get_visual_features(self, observation: np.ndarray) -> Optional[torch.Tensor]:
@@ -460,48 +421,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             print(f"   ⚠️ Frame stacking failed: {e}")
             return np.zeros(self.observation_space.shape, dtype=np.uint8)
 
-    def reset(self, **kwargs) -> Tuple[np.ndarray, Dict]:
-        """Reset with comprehensive state initialization and debugging"""
-        try:
-            obs, info = self.env.reset(**kwargs)
-
-            # Debug: Print initial game state
-            initial_health = info.get("health", MAX_HEALTH)
-            initial_enemy_health = info.get("enemy_health", MAX_HEALTH)
-            initial_score = info.get("score", 0)
-            initial_round = info.get("round", 1)
-
-            print(
-                f"   🔄 RESET: P:{initial_health}, E:{initial_enemy_health}, Score:{initial_score}, Round:{initial_round}"
-            )
-
-            # Reset game state
-            self.prev_player_health = initial_health
-            self.prev_enemy_health = initial_enemy_health
-            self.prev_score = initial_score
-            self.player_wins_in_episode = 0
-            self.enemy_wins_in_episode = 0
-
-            # Clear histories
-            self.health_history.clear()
-            self.action_history.clear()
-
-            # Initialize frame buffer
-            processed_frame = self._preprocess_frame(obs)
-            self.frame_buffer.clear()
-            for _ in range(self.frame_stack):
-                self.frame_buffer.append(processed_frame)
-
-            # Reset JEPA system
-            if self.enable_jepa and self.jepa_ready:
-                self._reset_jepa_state()
-
-            return self._get_stacked_observation(), info
-
-        except Exception as e:
-            print(f"   ❌ Reset failed: {e}")
-            return np.zeros(self.observation_space.shape, dtype=np.uint8), {}
-
     def _log_round_summary(self):
         """Log a summary of the round wins before reset"""
         if hasattr(self, "player_wins_in_episode") and hasattr(
@@ -513,14 +432,12 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 )
 
     def reset(self, **kwargs) -> Tuple[np.ndarray, Dict]:
-        """Reset with comprehensive state initialization and debugging"""
+        """Reset with comprehensive state initialization"""
         try:
-            # Log what happened in the previous episode
             self._log_round_summary()
 
             obs, info = self.env.reset(**kwargs)
 
-            # Debug: Print initial game state
             initial_health = info.get("health", MAX_HEALTH)
             initial_enemy_health = info.get("enemy_health", MAX_HEALTH)
             initial_score = info.get("score", 0)
@@ -567,11 +484,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             if hasattr(self, "game_state_history"):
                 self.game_state_history.clear()
 
-            # Initialize with meaningful zero states
             if self.feature_extractor is not None:
                 feature_dim = getattr(self.feature_extractor, "features_dim", 512)
                 zero_vf = torch.zeros(feature_dim, device=self.device)
-                zero_gs = np.zeros(10, dtype=np.float32)  # Updated for simplified state
+                zero_gs = np.zeros(10, dtype=np.float32)
 
                 for _ in range(self.state_history_length):
                     self.visual_features_history.append(zero_vf.clone())
@@ -581,16 +497,15 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             print(f"   ⚠️ JEPA state reset failed: {e}")
 
     def step(self, action) -> Tuple[np.ndarray, float, bool, bool, Dict]:
-        """Enhanced step function with improved game state detection"""
+        """Enhanced step function with strategic predictions"""
         try:
-            # Store action in history for pattern analysis
             self.action_history.append(action)
 
             current_stacked_obs = self._get_stacked_observation()
 
-            # Make JEPA prediction if ready
+            # Make strategic prediction if ready
             if self.enable_jepa and self.jepa_ready:
-                self._make_jepa_prediction(current_stacked_obs)
+                self._make_strategic_prediction(current_stacked_obs)
 
             # Execute environment step
             obs, _, terminated, truncated, next_info = self.env.step(action)
@@ -603,9 +518,9 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             else:
                 self.strategic_stats["game_paused_frames"] += 1
 
-            # Only evaluate predictions during active gameplay
+            # Evaluate strategic predictions during active gameplay
             if self.prediction_from_last_step is not None and is_active:
-                self._evaluate_prediction_accuracy(next_info)
+                self._evaluate_strategic_accuracy(next_info, action)
 
             # Calculate enhanced reward
             enhanced_reward = self._calculate_enhanced_reward(next_info)
@@ -627,9 +542,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             self.prev_enemy_health = next_info.get(
                 "enemy_health", self.prev_enemy_health
             )
-            self.prev_score = next_info.get(
-                "score", self.prev_score
-            )  # Added for enhanced reward
+            self.prev_score = next_info.get("score", self.prev_score)
 
             return (
                 self._get_stacked_observation(),
@@ -649,8 +562,8 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 {},
             )
 
-    def _make_jepa_prediction(self, current_stacked_obs: np.ndarray):
-        """Make JEPA prediction with enhanced game state"""
+    def _make_strategic_prediction(self, current_stacked_obs: np.ndarray):
+        """Make strategic attack/defense predictions"""
         try:
             visual_features = self._get_visual_features(current_stacked_obs)
             if visual_features is None:
@@ -677,45 +590,88 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     self.prediction_from_last_step = self.jepa_predictor(vf_seq, gs_seq)
 
         except Exception as e:
-            print(f"   ⚠️ JEPA prediction failed: {e}")
+            print(f"   ⚠️ Strategic prediction failed: {e}")
             self.prediction_from_last_step = None
 
-    def _evaluate_prediction_accuracy(self, next_info: Dict):
-        """Improved prediction accuracy evaluation with reduced logging"""
+    def _is_good_attack_timing(
+        self, damage_dealt: int, action, game_state: Dict
+    ) -> bool:
+        """Determine if this was good attack timing"""
+        try:
+            player_health = game_state.get("health", self.prev_player_health)
+            enemy_health = game_state.get("enemy_health", self.prev_enemy_health)
+
+            # Good attack timing indicators:
+            if damage_dealt > 5:  # Significant damage
+                return True
+            if (
+                damage_dealt > 0 and enemy_health < CRITICAL_HEALTH_THRESHOLD
+            ):  # Finish move
+                return True
+            if (
+                damage_dealt > 0 and player_health > enemy_health * 1.3
+            ):  # Health advantage
+                return True
+            if damage_dealt > 0 and enemy_health > MAX_HEALTH * 0.7:  # Early aggression
+                return True
+
+            return False
+
+        except Exception:
+            return False
+
+    def _is_good_defense_timing(
+        self, damage_taken: int, action, game_state: Dict
+    ) -> bool:
+        """Determine if this was good defense timing"""
+        try:
+            player_health = game_state.get("health", self.prev_player_health)
+            enemy_health = game_state.get("enemy_health", self.prev_enemy_health)
+
+            # Good defense timing indicators:
+            if (
+                damage_taken == 0 and self.prev_player_health == player_health
+            ):  # Avoided damage
+                return True
+            if damage_taken > 0 and damage_taken < 5:  # Minimal damage taken
+                return True
+            if (
+                player_health < CRITICAL_HEALTH_THRESHOLD and damage_taken == 0
+            ):  # Critical defense
+                return True
+            if (
+                enemy_health < player_health * 0.7 and damage_taken == 0
+            ):  # Defensive when ahead
+                return True
+
+            return False
+
+        except Exception:
+            return False
+
+    def _evaluate_strategic_accuracy(self, next_info: Dict, action):
+        """Evaluate strategic prediction accuracy"""
         try:
             player_health_after = next_info.get("health", self.prev_player_health)
             enemy_health_after = next_info.get("enemy_health", self.prev_enemy_health)
 
-            # Calculate damage
             damage_to_enemy = max(0, self.prev_enemy_health - enemy_health_after)
             damage_to_player = max(0, self.prev_player_health - player_health_after)
 
-            # Update damage statistics
-            self.damage_stats["total_frames"] += 1
-            current_frame = self.damage_stats["total_frames"]
+            # Determine ground truth for strategic decisions
+            was_good_attack_timing = self._is_good_attack_timing(
+                damage_to_enemy, action, next_info
+            )
+            was_good_defense_timing = self._is_good_defense_timing(
+                damage_to_player, action, next_info
+            )
 
-            if damage_to_player > 1:
-                self.damage_stats["player_damage_frames"] += 1
-                interval = current_frame - self.damage_stats["last_damage_frame"]
-                if self.damage_stats["last_damage_frame"] > 0:
-                    self.damage_stats["damage_intervals"].append(interval)
-                self.damage_stats["last_damage_frame"] = current_frame
-
-            if damage_to_enemy > 1:
-                self.damage_stats["enemy_damage_frames"] += 1
-
-            # Define ground truth
             ground_truth = {
-                "will_opponent_attack": float(damage_to_player > 1),
-                "will_opponent_take_damage": float(damage_to_enemy > 1),
-                "will_player_take_damage": float(damage_to_player > 1),
-                "will_round_end_soon": float(
-                    player_health_after < (MAX_HEALTH * 0.2)
-                    or enemy_health_after < (MAX_HEALTH * 0.2)
-                ),
+                "is_best_time_to_attack": float(was_good_attack_timing),
+                "is_best_time_to_defend": float(was_good_defense_timing),
             }
 
-            # Evaluate predictions with adaptive thresholds
+            # Evaluate strategic predictions
             num_predictions = 0
             for key, pred_tensor in self.prediction_from_last_step.items():
                 if key in ground_truth:
@@ -727,93 +683,67 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                         actual_label = int(ground_truth[key])
                         is_correct = predicted_label == actual_label
 
-                        # Update confusion matrix for damage predictions
-                        if key == "will_player_take_damage":
-                            if predicted_label == 1 and actual_label == 1:
-                                self.damage_stats["true_positives"] += 1
-                            elif predicted_label == 1 and actual_label == 0:
-                                self.damage_stats["false_positives"] += 1
-                            elif predicted_label == 0 and actual_label == 1:
-                                self.damage_stats["false_negatives"] += 1
-                            else:
-                                self.damage_stats["true_negatives"] += 1
+                        # Log significant strategic events
+                        if key == "is_best_time_to_attack" and actual_label == 1:
+                            result_str = "✅ CORRECT" if is_correct else "❌ MISSED"
+                            print(
+                                f"      ⚔️ ATTACK OPPORTUNITY: {result_str}, prob={predicted_prob:.3f}"
+                            )
 
-                            # REDUCED LOGGING: Only log significant events
-                            if actual_label == 1:  # Actual damage
-                                result_str = (
-                                    "✅ DETECTED" if is_correct else "❌ MISSED"
-                                )
-                                print(
-                                    f"      🚨 DAMAGE EVENT: prob={predicted_prob:.3f}, {result_str}"
-                                )
-                            elif (
-                                predicted_label == 1 and predicted_prob > 0.7
-                            ):  # High confidence false alarm
-                                print(
-                                    f"      ⚡ HIGH CONF FALSE ALARM: prob={predicted_prob:.3f}"
-                                )
+                        elif key == "is_best_time_to_defend" and actual_label == 1:
+                            result_str = "✅ CORRECT" if is_correct else "❌ MISSED"
+                            # print(
+                            #     f"      🛡️ DEFENSE OPPORTUNITY: {result_str}, prob={predicted_prob:.3f}"
+                            # )
+                            pass
 
                         # Update statistics
                         if is_correct:
-                            self.strategic_stats["individual_correct"][key] += 1
+                            self.strategic_stats["strategic_correct"][key] += 1
 
-                        self.strategic_stats["individual_predictions"][key] += 1
+                        self.strategic_stats["strategic_predictions"][key] += 1
                         num_predictions += 1
 
                         # Update accuracy with adaptive learning rate
                         current_accuracy = float(is_correct)
-                        self.strategic_stats["individual_accuracies"][key] = (
+                        self.strategic_stats["strategic_accuracies"][key] = (
                             1 - ACCURACY_LEARNING_RATE
-                        ) * self.strategic_stats["individual_accuracies"][
+                        ) * self.strategic_stats["strategic_accuracies"][
                             key
                         ] + ACCURACY_LEARNING_RATE * current_accuracy
 
                     except Exception as e:
-                        print(f"   ⚠️ Prediction evaluation error for {key}: {e}")
+                        print(f"   ⚠️ Strategic evaluation error for {key}: {e}")
                         continue
 
             # Update prediction count and periodic reporting
             if num_predictions > 0:
-                self.strategic_stats["binary_predictions_made"] += 1
+                self.strategic_stats["strategic_predictions_made"] += 1
 
-                # Reduced reporting frequency
-                if self.strategic_stats["binary_predictions_made"] % 1000 == 0:
-                    self._print_comprehensive_stats()
+                if self.strategic_stats["strategic_predictions_made"] % 1000 == 0:
+                    self._print_strategic_stats()
 
         except Exception as e:
-            print(f"   ⚠️ Prediction accuracy evaluation failed: {e}")
+            print(f"   ⚠️ Strategic accuracy evaluation failed: {e}")
 
-    def _print_comprehensive_stats(self):
-        """Print comprehensive statistics less frequently"""
+    def _print_strategic_stats(self):
+        """Print strategic prediction statistics"""
         try:
             print(
-                f"\n   📊 JEPA Performance Report (after {self.strategic_stats['binary_predictions_made']} predictions):"
+                f"\n   📊 Strategic JEPA Report (after {self.strategic_stats['strategic_predictions_made']} predictions):"
             )
 
             for outcome, accuracy in self.strategic_stats[
-                "individual_accuracies"
+                "strategic_accuracies"
             ].items():
-                total_preds = self.strategic_stats["individual_predictions"][outcome]
-                total_correct = self.strategic_stats["individual_correct"][outcome]
-                threshold = PREDICTION_THRESHOLDS.get(outcome, 0.5)
+                total_preds = self.strategic_stats["strategic_predictions"][outcome]
+                total_correct = self.strategic_stats["strategic_correct"][outcome]
 
                 if total_preds > 0:
-                    if outcome == "will_player_take_damage":
-                        tp = self.damage_stats["true_positives"]
-                        fp = self.damage_stats["false_positives"]
-                        fn = self.damage_stats["false_negatives"]
-
-                        precision = tp / max(1, tp + fp)
-                        recall = tp / max(1, tp + fn)
-                        f1 = 2 * (precision * recall) / max(0.001, precision + recall)
-
-                        print(
-                            f"      {outcome}: {accuracy*100:.1f}% | P={precision:.3f} R={recall:.3f} F1={f1:.3f}"
-                        )
-                    else:
-                        print(
-                            f"      {outcome}: {accuracy*100:.1f}% ({total_correct}/{total_preds})"
-                        )
+                    readable_name = outcome.replace("is_best_time_to_", "").title()
+                    print(
+                        f"      {readable_name} Timing: {accuracy*100:.1f}% ({total_correct}/{total_preds})"
+                    )
 
             # Game activity analysis
             total_frames = (
@@ -828,66 +758,42 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     f"   🎮 Game Activity: {active_rate:.1f}% active ({self.strategic_stats['game_active_frames']}/{total_frames})"
                 )
 
-            # Damage analysis
-            if self.damage_stats["total_frames"] > 100:
-                player_damage_rate = (
-                    self.damage_stats["player_damage_frames"]
-                    / self.damage_stats["total_frames"]
-                    * 100
-                )
-                print(
-                    f"   💥 Damage Rate: {player_damage_rate:.3f}% ({self.damage_stats['player_damage_frames']} events)"
-                )
-
-                if len(self.damage_stats["damage_intervals"]) > 1:
-                    avg_interval = np.mean(self.damage_stats["damage_intervals"])
-                    print(f"   ⏱️ Avg Damage Interval: {avg_interval:.1f} frames")
-
         except Exception as e:
-            print(f"   ⚠️ Stats printing failed: {e}")
+            print(f"   ⚠️ Strategic stats printing failed: {e}")
 
     def _calculate_enhanced_reward(self, next_info: Dict) -> float:
         """Calculate enhanced reward with better balance for learning"""
         try:
-            # 1. Get current and previous state variables
             my_health = next_info.get("health", self.prev_player_health)
             enemy_health = next_info.get("enemy_health", self.prev_enemy_health)
             my_score = next_info.get("score", self.prev_score)
 
-            # 2. Calculate Core Deltas
             damage_dealt = max(0, self.prev_enemy_health - enemy_health)
             damage_taken = max(0, self.prev_player_health - my_health)
             score_delta = max(0, my_score - self.prev_score)
 
-            # 3. Base survival reward (small positive for staying alive)
+            # Base survival reward
             survival_reward = 0.01
 
-            # 4. Health-based rewards (balanced to not be too harsh)
+            # Health-based rewards (balanced)
             health_reward = 0.0
             if damage_dealt > 0:
-                health_reward += (
-                    damage_dealt * 0.5 / MAX_HEALTH
-                )  # Reward for dealing damage
+                health_reward += damage_dealt * 0.5 / MAX_HEALTH
             if damage_taken > 0:
-                health_reward -= (
-                    damage_taken * 0.3 / MAX_HEALTH
-                )  # Lighter penalty for taking damage
+                health_reward -= damage_taken * 0.3 / MAX_HEALTH
 
-            # 5. Score-based reward (encourage good moves)
+            # Score-based reward
             score_reward = score_delta * 0.001 if score_delta > 0 else 0
 
-            # 6. Strategic multipliers (only for damage dealt)
+            # Strategic multipliers
             if damage_dealt > 0:
-                # Aggression bonus when ahead
                 health_ratio = my_health / (enemy_health + 1e-6)
                 if health_ratio > 1.5:
                     health_reward *= 1.3
-
-                # Comeback bonus when behind
                 if my_health < MAX_HEALTH * 0.4:
                     health_reward *= 1.5
 
-            # 7. Win/Loss Rewards (check for round end)
+            # Win/Loss Rewards
             win_loss_reward = 0.0
             round_ended = (my_health <= 0 or enemy_health <= 0) and (
                 self.prev_player_health > 0 and self.prev_enemy_health > 0
@@ -895,38 +801,34 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
             if round_ended:
                 if my_health > enemy_health:
-                    win_loss_reward = 10.0  # Win bonus
+                    win_loss_reward = 10.0
                     self.player_wins_in_episode += 1
                     print(
                         f"   🏆 ROUND WON! Player wins: {self.player_wins_in_episode}, Player HP: {my_health}, Enemy HP: {enemy_health}"
                     )
                 else:
-                    win_loss_reward = -5.0  # Loss penalty (lighter)
+                    win_loss_reward = -5.0
                     self.enemy_wins_in_episode += 1
                     print(
                         f"   💀 ROUND LOST! Enemy wins: {self.enemy_wins_in_episode}, Player HP: {my_health}, Enemy HP: {enemy_health}"
                     )
 
-            # Also check for potential round end conditions we might be missing
             elif my_health <= 0 and self.prev_player_health > 0:
-                # Player died
                 win_loss_reward = -5.0
                 self.enemy_wins_in_episode += 1
                 print(f"   💀 PLAYER DIED! Enemy wins: {self.enemy_wins_in_episode}")
             elif enemy_health <= 0 and self.prev_enemy_health > 0:
-                # Enemy died
                 win_loss_reward = 10.0
                 self.player_wins_in_episode += 1
                 print(
                     f"   🏆 ENEMY DEFEATED! Player wins: {self.player_wins_in_episode}"
                 )
 
-            # 8. Combine all rewards
             total_reward = (
                 survival_reward + health_reward + score_reward + win_loss_reward
             )
 
-            # 9. Debug logging for significant events only
+            # Debug logging for significant events only
             if win_loss_reward != 0 or damage_dealt > 5 or damage_taken > 5:
                 print(
                     f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, win_loss:{win_loss_reward:.1f})"
@@ -936,7 +838,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
         except Exception as e:
             print(f"   ⚠️ Reward calculation failed: {e}")
-            return 0.01  # Small positive default
+            return 0.01
 
     def _handle_episode_termination(
         self, terminated: bool, truncated: bool, next_info: Dict
@@ -948,11 +850,9 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             current_player = next_info.get("health", self.prev_player_health)
             current_enemy = next_info.get("enemy_health", self.prev_enemy_health)
 
-            # Check for match end when episode terminates OR when someone gets 2 wins
             match_ended = False
 
             if self.player_wins_in_episode >= 2:
-                # Player won the match (best of 3)
                 match_ended = True
                 self.current_stats["wins"] += 1
                 print(
@@ -960,7 +860,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 )
 
             elif self.enemy_wins_in_episode >= 2:
-                # Enemy won the match (best of 3)
                 match_ended = True
                 self.current_stats["losses"] += 1
                 print(
@@ -968,7 +867,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 )
 
             elif done and not match_ended:
-                # Episode ended without clear 2-round winner - determine winner by current state
                 if self.player_wins_in_episode > self.enemy_wins_in_episode:
                     self.current_stats["wins"] += 1
                     print(
@@ -980,7 +878,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                         f"   😞 EPISODE LOSS! Player rounds: {self.player_wins_in_episode} vs Enemy: {self.enemy_wins_in_episode}"
                     )
                 else:
-                    # Tie or no clear winner - check final health
                     if current_player > current_enemy:
                         self.current_stats["wins"] += 1
                         print(
@@ -995,7 +892,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
             if match_ended:
                 done = True
-                # Update statistics
                 self.current_stats["total_rounds"] = (
                     self.current_stats["wins"] + self.current_stats["losses"]
                 )
@@ -1004,7 +900,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                         self.current_stats["wins"] / self.current_stats["total_rounds"]
                     )
 
-                # Log final match result
                 print(
                     f"   📊 UPDATED MATCH STATS: {self.current_stats['wins']}W/{self.current_stats['losses']}L (WR: {self.current_stats['win_rate']*100:.1f}%)"
                 )
@@ -1013,7 +908,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
         except Exception as e:
             print(f"   ⚠️ Episode termination handling failed: {e}")
-            return terminated or truncated  # Use original values as fallback
+            return terminated or truncated
 
     def close(self):
         """Clean up resources"""
