@@ -355,17 +355,17 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
     def _extract_enhanced_game_state_vector(self, info: Dict) -> np.ndarray:
         """Extract simplified but powerful game state vector (10 features)"""
         try:
-            # 1. Get raw variables
+            # 1. health, enemy health, round
             player_health = info.get("health", self.prev_player_health)
             enemy_health = info.get("enemy_health", self.prev_enemy_health)
             round_num = info.get("round", 1)
 
             # 2. Derive Relational and Contextual Features
-            # Feature 1 & 2: Normalized Health (Basic Info)
+            # Feature 1 & 2: each one's health
             f1_player_health_norm = player_health / MAX_HEALTH
             f2_enemy_health_norm = enemy_health / MAX_HEALTH
 
-            # Feature 3: Health Differential (Who is winning?)
+            # Feature 3: who is winning
             f3_health_advantage = (player_health - enemy_health) / MAX_HEALTH
 
             # Feature 4: Health Ratio (How dominant is the advantage?)
@@ -389,13 +389,19 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
 
             return np.array(
                 [
+                    # each one's health
                     f1_player_health_norm,
                     f2_enemy_health_norm,
+                    # who is winning
                     f3_health_advantage,
+                    # how dominate the health
                     f4_health_ratio,
+                    # fight progress
                     f5_total_health_pool,
+                    # who is in critical
                     f6_player_is_critical,
                     f7_enemy_is_critical,
+                    # 3 rounds
                     f8_is_round_1,
                     f9_is_round_2,
                     f10_is_round_3,
@@ -457,6 +463,61 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
     def reset(self, **kwargs) -> Tuple[np.ndarray, Dict]:
         """Reset with comprehensive state initialization and debugging"""
         try:
+            obs, info = self.env.reset(**kwargs)
+
+            # Debug: Print initial game state
+            initial_health = info.get("health", MAX_HEALTH)
+            initial_enemy_health = info.get("enemy_health", MAX_HEALTH)
+            initial_score = info.get("score", 0)
+            initial_round = info.get("round", 1)
+
+            print(
+                f"   🔄 RESET: P:{initial_health}, E:{initial_enemy_health}, Score:{initial_score}, Round:{initial_round}"
+            )
+
+            # Reset game state
+            self.prev_player_health = initial_health
+            self.prev_enemy_health = initial_enemy_health
+            self.prev_score = initial_score
+            self.player_wins_in_episode = 0
+            self.enemy_wins_in_episode = 0
+
+            # Clear histories
+            self.health_history.clear()
+            self.action_history.clear()
+
+            # Initialize frame buffer
+            processed_frame = self._preprocess_frame(obs)
+            self.frame_buffer.clear()
+            for _ in range(self.frame_stack):
+                self.frame_buffer.append(processed_frame)
+
+            # Reset JEPA system
+            if self.enable_jepa and self.jepa_ready:
+                self._reset_jepa_state()
+
+            return self._get_stacked_observation(), info
+
+        except Exception as e:
+            print(f"   ❌ Reset failed: {e}")
+            return np.zeros(self.observation_space.shape, dtype=np.uint8), {}
+
+    def _log_round_summary(self):
+        """Log a summary of the round wins before reset"""
+        if hasattr(self, "player_wins_in_episode") and hasattr(
+            self, "enemy_wins_in_episode"
+        ):
+            if self.player_wins_in_episode > 0 or self.enemy_wins_in_episode > 0:
+                print(
+                    f"   🎯 Episode Summary: Player rounds won: {self.player_wins_in_episode}, Enemy rounds won: {self.enemy_wins_in_episode}"
+                )
+
+    def reset(self, **kwargs) -> Tuple[np.ndarray, Dict]:
+        """Reset with comprehensive state initialization and debugging"""
+        try:
+            # Log what happened in the previous episode
+            self._log_round_summary()
+
             obs, info = self.env.reset(**kwargs)
 
             # Debug: Print initial game state
@@ -837,24 +898,39 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     win_loss_reward = 10.0  # Win bonus
                     self.player_wins_in_episode += 1
                     print(
-                        f"   🏆 ROUND WON! Player wins: {self.player_wins_in_episode}"
+                        f"   🏆 ROUND WON! Player wins: {self.player_wins_in_episode}, Player HP: {my_health}, Enemy HP: {enemy_health}"
                     )
                 else:
                     win_loss_reward = -5.0  # Loss penalty (lighter)
                     self.enemy_wins_in_episode += 1
-                    print(f"   💀 ROUND LOST! Enemy wins: {self.enemy_wins_in_episode}")
+                    print(
+                        f"   💀 ROUND LOST! Enemy wins: {self.enemy_wins_in_episode}, Player HP: {my_health}, Enemy HP: {enemy_health}"
+                    )
+
+            # Also check for potential round end conditions we might be missing
+            elif my_health <= 0 and self.prev_player_health > 0:
+                # Player died
+                win_loss_reward = -5.0
+                self.enemy_wins_in_episode += 1
+                print(f"   💀 PLAYER DIED! Enemy wins: {self.enemy_wins_in_episode}")
+            elif enemy_health <= 0 and self.prev_enemy_health > 0:
+                # Enemy died
+                win_loss_reward = 10.0
+                self.player_wins_in_episode += 1
+                print(
+                    f"   🏆 ENEMY DEFEATED! Player wins: {self.player_wins_in_episode}"
+                )
 
             # 8. Combine all rewards
             total_reward = (
                 survival_reward + health_reward + score_reward + win_loss_reward
             )
 
-            # 9. Debug logging for significant events
-            if damage_dealt > 0 or damage_taken > 0 or win_loss_reward != 0:
-                # print(
-                #    f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, win_loss:{win_loss_reward:.1f})"
-                # )
-                pass
+            # 9. Debug logging for significant events only
+            if win_loss_reward != 0 or damage_dealt > 5 or damage_taken > 5:
+                print(
+                    f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, win_loss:{win_loss_reward:.1f})"
+                )
 
             return float(total_reward)
 
@@ -865,28 +941,56 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
     def _handle_episode_termination(
         self, terminated: bool, truncated: bool, next_info: Dict
     ) -> bool:
-        """Handle episode termination with better win/loss detection"""
+        """Handle episode termination with proper win/loss detection"""
         try:
             done = terminated or truncated
 
             current_player = next_info.get("health", self.prev_player_health)
             current_enemy = next_info.get("enemy_health", self.prev_enemy_health)
 
-            # Check for match end (best of 3) - be more permissive
+            # Check for match end when episode terminates OR when someone gets 2 wins
             match_ended = False
+
             if self.player_wins_in_episode >= 2:
+                # Player won the match (best of 3)
                 match_ended = True
                 self.current_stats["wins"] += 1
-                print(f"   🎉 MATCH WON! Total wins: {self.current_stats['wins']}")
+                print(
+                    f"   🎉 MATCH WON! Player got {self.player_wins_in_episode} rounds. Total match wins: {self.current_stats['wins']}"
+                )
+
             elif self.enemy_wins_in_episode >= 2:
+                # Enemy won the match (best of 3)
                 match_ended = True
                 self.current_stats["losses"] += 1
-                print(f"   😞 MATCH LOST! Total losses: {self.current_stats['losses']}")
+                print(
+                    f"   😞 MATCH LOST! Enemy got {self.enemy_wins_in_episode} rounds. Total match losses: {self.current_stats['losses']}"
+                )
 
-            # Also check if both players are at 0 health (draw/reset scenario)
-            if current_player <= 0 and current_enemy <= 0 and not match_ended:
-                # Treat as a loss if no clear winner
-                self.current_stats["losses"] += 1
+            elif done and not match_ended:
+                # Episode ended without clear 2-round winner - determine winner by current state
+                if self.player_wins_in_episode > self.enemy_wins_in_episode:
+                    self.current_stats["wins"] += 1
+                    print(
+                        f"   🎉 EPISODE WIN! Player rounds: {self.player_wins_in_episode} vs Enemy: {self.enemy_wins_in_episode}"
+                    )
+                elif self.enemy_wins_in_episode > self.player_wins_in_episode:
+                    self.current_stats["losses"] += 1
+                    print(
+                        f"   😞 EPISODE LOSS! Player rounds: {self.player_wins_in_episode} vs Enemy: {self.enemy_wins_in_episode}"
+                    )
+                else:
+                    # Tie or no clear winner - check final health
+                    if current_player > current_enemy:
+                        self.current_stats["wins"] += 1
+                        print(
+                            f"   🎉 HEALTH WIN! P:{current_player} > E:{current_enemy}"
+                        )
+                    else:
+                        self.current_stats["losses"] += 1
+                        print(
+                            f"   😞 HEALTH LOSS! P:{current_player} <= E:{current_enemy}"
+                        )
                 match_ended = True
 
             if match_ended:
@@ -900,9 +1004,9 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                         self.current_stats["wins"] / self.current_stats["total_rounds"]
                     )
 
-                # Log match result
+                # Log final match result
                 print(
-                    f"   📊 Match Stats: {self.current_stats['wins']}W/{self.current_stats['losses']}L (WR: {self.current_stats['win_rate']*100:.1f}%)"
+                    f"   📊 UPDATED MATCH STATS: {self.current_stats['wins']}W/{self.current_stats['losses']}L (WR: {self.current_stats['win_rate']*100:.1f}%)"
                 )
 
             return done
