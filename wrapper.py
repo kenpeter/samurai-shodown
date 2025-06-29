@@ -396,8 +396,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             # Reduced logging (every 500 frames instead of 100)
             if self._debug_counter % 500 == 0 or explicit_activity:
                 if explicit_activity:
-                    # print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
-                    pass
+                    print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
                 elif is_active:
                     print(
                         f"   🟡 ASSUMED ACTIVE: Fight ongoing (P:{current_player}, E:{current_enemy}, R:{current_round})"
@@ -455,15 +454,25 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             # Store current health as tuple (not array) for next calculation
             self.health_history.append((player_health, enemy_health))
 
-            # Calculate score momentum (rate of score increase)
+            # Calculate score momentum (rate of score increase) - FIX: Better normalization
             score_momentum = 0.0
             if (
                 hasattr(self, "_last_score_for_momentum")
                 and self._last_score_for_momentum is not None
             ):
-                score_momentum = (
-                    score - self._last_score_for_momentum
-                ) / 1000.0  # Normalize score changes
+                score_delta = score - self._last_score_for_momentum
+
+                # Normalize by clamping large values and using relative change
+                if score_delta > 0:
+                    # Cap maximum meaningful score change per frame
+                    score_delta = min(score_delta, 10000)  # Max 10k points per frame
+                    # Use tanh to compress large values to [-1, 1] range
+                    score_momentum = np.tanh(score_delta / 1000.0)
+                elif score_delta < 0:
+                    # Handle score resets (new round/game)
+                    score_momentum = 0.0
+                else:
+                    score_momentum = 0.0
             self._last_score_for_momentum = score
 
             # Calculate action momentum from action history - FIX: Convert arrays to hashable
