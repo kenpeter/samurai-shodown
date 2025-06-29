@@ -18,6 +18,7 @@ from typing import Dict, Optional, Tuple
 MAX_HEALTH = 176
 PREDICTION_THRESHOLD = 0.5
 ACCURACY_LEARNING_RATE = 0.01  # Increased for faster adaptation
+CRITICAL_HEALTH_THRESHOLD = MAX_HEALTH * 0.3
 
 # Adaptive thresholds based on observed patterns
 PREDICTION_THRESHOLDS = {
@@ -60,7 +61,7 @@ class JEPAImprovedPredictor(nn.Module):
     """Improved JEPA predictor with better learning signals"""
 
     def __init__(
-        self, visual_dim=512, sequence_length=8, prediction_horizon=8, game_state_dim=8
+        self, visual_dim=512, sequence_length=8, prediction_horizon=8, game_state_dim=10
     ):
         super().__init__()
         self.prediction_horizon = prediction_horizon
@@ -206,6 +207,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
         # Enhanced game state tracking
         self.prev_player_health = MAX_HEALTH
         self.prev_enemy_health = MAX_HEALTH
+        self.prev_score = 0  # Added for enhanced reward calculation
         self.health_history = deque(maxlen=10)  # Track health changes over time
         self.action_history = deque(maxlen=5)  # Track recent actions
 
@@ -302,10 +304,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                     visual_dim=visual_dim,
                     sequence_length=self.state_history_length,
                     prediction_horizon=self.frame_stack,
-                    game_state_dim=15,  # Updated for enhanced features
+                    game_state_dim=10,  # Updated to match new simplified state vector
                 ).to(self.device)
                 print(
-                    f"   🧠 Improved JEPA Predictor initialized with visual_dim={visual_dim}"
+                    f"   🧠 Improved JEPA Predictor initialized with visual_dim={visual_dim}, game_state_dim=10"
                 )
 
             except Exception as e:
@@ -313,111 +315,31 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 self.jepa_predictor = None
 
     def _is_game_active(self, info: Dict) -> bool:
-        """Detect if game is actively running - EXPANDED DEFINITION for better training"""
+        """Simplified game activity detection - assume most frames are active for better training"""
         try:
-            # Get current game state
             current_player = info.get("health", self.prev_player_health)
             current_enemy = info.get("enemy_health", self.prev_enemy_health)
-            current_timer = info.get("timer", None)
-            current_round = info.get("round", 0)
-            current_score = info.get("score", None)
 
-            # Initialize tracking variables if not exists
-            if not hasattr(self, "_last_timer"):
-                self._last_timer = current_timer
-            if not hasattr(self, "_last_round"):
-                self._last_round = current_round
-            if not hasattr(self, "_last_score"):
-                self._last_score = current_score
+            # Initialize counters
             if not hasattr(self, "_debug_counter"):
                 self._debug_counter = 0
-            if not hasattr(self, "_last_active_frame"):
-                self._last_active_frame = 0
-
-            # Increment debug counter
             self._debug_counter += 1
 
-            # Check for explicit changes (traditional active detection)
-            explicit_activity = False
-            activity_reasons = []
+            # Much more permissive activity detection for better training
+            # Consider active if both players have health (fight is possible)
+            is_active = current_player > 0 and current_enemy > 0
 
-            # 1. Health changes (combat)
-            if current_player != self.prev_player_health:
-                explicit_activity = True
-                activity_reasons.append(
-                    f"Player health: {self.prev_player_health}→{current_player}"
+            # Minimal logging to reduce spam
+            if self._debug_counter % 2000 == 0:  # Every 2000 frames
+                print(
+                    f"   🎮 Game Status: P:{current_player}, E:{current_enemy}, Active:{is_active}"
                 )
-
-            if current_enemy != self.prev_enemy_health:
-                explicit_activity = True
-                activity_reasons.append(
-                    f"Enemy health: {self.prev_enemy_health}→{current_enemy}"
-                )
-
-            # 2. Timer/Round/Score changes
-            if current_timer is not None and current_timer != self._last_timer:
-                explicit_activity = True
-                activity_reasons.append(f"Timer: {self._last_timer}→{current_timer}")
-                self._last_timer = current_timer
-
-            if current_round != self._last_round:
-                explicit_activity = True
-                activity_reasons.append(f"Round: {self._last_round}→{current_round}")
-                self._last_round = current_round
-
-            if current_score is not None and current_score != self._last_score:
-                explicit_activity = True
-                activity_reasons.append(f"Score: {self._last_score}→{current_score}")
-                self._last_score = current_score
-
-            # 3. EXPANDED DEFINITION: Active if fight is ongoing
-            # Consider "active" if both players have health and game seems running
-            fight_ongoing = (
-                current_player > 0
-                and current_enemy > 0
-                and current_round == 0  # Still in a round
-            )
-
-            # 4. Proximity to recent activity (within 50 frames of last damage)
-            frames_since_explicit_activity = (
-                self._debug_counter - self._last_active_frame
-            )
-            near_recent_activity = frames_since_explicit_activity <= 50
-
-            # COMBINED ACTIVE DECISION
-            is_active = explicit_activity or (
-                fight_ongoing and not self._is_likely_paused()
-            )
-
-            # Update last active frame
-            if explicit_activity:
-                self._last_active_frame = self._debug_counter
-
-            # Reduced logging (every 500 frames instead of 100)
-            if self._debug_counter % 500 == 0 or explicit_activity:
-                if explicit_activity:
-                    print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
-                elif is_active:
-                    print(
-                        f"   🟡 ASSUMED ACTIVE: Fight ongoing (P:{current_player}, E:{current_enemy}, R:{current_round})"
-                    )
-                else:
-                    print(f"   🔴 INACTIVE: No changes, fight_ongoing={fight_ongoing}")
-
-                # Periodic status report
-                if self._debug_counter % 1000 == 0:
-                    activity_rate = (
-                        self._last_active_frame / max(1, self._debug_counter)
-                    ) * 100
-                    print(
-                        f"   📊 Activity Summary: {activity_rate:.1f}% active over {self._debug_counter} frames"
-                    )
 
             return is_active
 
         except Exception as e:
             print(f"   ❌ Game activity detection error: {e}")
-            return True  # Assume active if we can't determine
+            return True  # Default to active
 
     def _is_likely_paused(self) -> bool:
         """Detect if game is likely paused/stuck based on patterns"""
@@ -431,100 +353,52 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             return False
 
     def _extract_enhanced_game_state_vector(self, info: Dict) -> np.ndarray:
-        """Extract enhanced game state with verified available features only"""
+        """Extract simplified but powerful game state vector (10 features)"""
         try:
+            # 1. Get raw variables
             player_health = info.get("health", self.prev_player_health)
             enemy_health = info.get("enemy_health", self.prev_enemy_health)
             round_num = info.get("round", 1)
-            timer = info.get("timer", 99)
-            score = info.get("score", 0)
 
-            # Calculate health momentum (rate of change) - FIX: Store tuples not arrays
-            health_momentum_player = 0.0
-            health_momentum_enemy = 0.0
-            if len(self.health_history) > 1:
-                prev_player_health, prev_enemy_health = self.health_history[
-                    -1
-                ]  # Unpack tuple
-                health_momentum_player = (
-                    player_health - prev_player_health
-                ) / MAX_HEALTH
-                health_momentum_enemy = (enemy_health - prev_enemy_health) / MAX_HEALTH
+            # 2. Derive Relational and Contextual Features
+            # Feature 1 & 2: Normalized Health (Basic Info)
+            f1_player_health_norm = player_health / MAX_HEALTH
+            f2_enemy_health_norm = enemy_health / MAX_HEALTH
 
-            # Store current health as tuple (not array) for next calculation
-            self.health_history.append((player_health, enemy_health))
+            # Feature 3: Health Differential (Who is winning?)
+            f3_health_advantage = (player_health - enemy_health) / MAX_HEALTH
 
-            # Calculate score momentum (rate of score increase) - FIX: Better normalization
-            score_momentum = 0.0
-            if (
-                hasattr(self, "_last_score_for_momentum")
-                and self._last_score_for_momentum is not None
-            ):
-                score_delta = score - self._last_score_for_momentum
+            # Feature 4: Health Ratio (How dominant is the advantage?)
+            f4_health_ratio = player_health / (enemy_health + 1e-6)
 
-                # Normalize by clamping large values and using relative change
-                if score_delta > 0:
-                    # Cap maximum meaningful score change per frame
-                    score_delta = min(score_delta, 10000)  # Max 10k points per frame
-                    # Use tanh to compress large values to [-1, 1] range
-                    score_momentum = np.tanh(score_delta / 1000.0)
-                elif score_delta < 0:
-                    # Handle score resets (new round/game)
-                    score_momentum = 0.0
-                else:
-                    score_momentum = 0.0
-            self._last_score_for_momentum = score
+            # Feature 5: Total Fight Progress (Is the fight ending?)
+            f5_total_health_pool = (player_health + enemy_health) / (2 * MAX_HEALTH)
 
-            # Calculate action momentum from action history - FIX: Convert arrays to hashable
-            recent_action_variety = 0.0
-            if len(self.action_history) >= 3:
-                recent_actions = list(self.action_history)[-3:]
-                # Convert numpy arrays to tuples or ints for hashing
-                hashable_actions = []
-                for action in recent_actions:
-                    if isinstance(action, np.ndarray):
-                        # Convert array to tuple for hashing
-                        hashable_actions.append(tuple(action.flatten()))
-                    elif hasattr(action, "item"):  # scalar numpy types
-                        hashable_actions.append(action.item())
-                    else:
-                        hashable_actions.append(action)
+            # Feature 6 & 7: Critical State Flags (Is someone in danger?)
+            f6_player_is_critical = (
+                1.0 if player_health < CRITICAL_HEALTH_THRESHOLD else 0.0
+            )
+            f7_enemy_is_critical = (
+                1.0 if enemy_health < CRITICAL_HEALTH_THRESHOLD else 0.0
+            )
 
-                unique_actions = len(set(hashable_actions))
-                recent_action_variety = (
-                    unique_actions / 3.0
-                )  # Variety in recent actions
-
-            # Health-based tactical features
-            health_ratio = player_health / max(1, enemy_health)  # Who has advantage
-            health_sum = (player_health + enemy_health) / (
-                2 * MAX_HEALTH
-            )  # Total health remaining
-            health_urgency = (
-                1.0 - min(player_health, enemy_health) / MAX_HEALTH
-            )  # How urgent the fight is
+            # Feature 8, 9, 10: Round (One-Hot Encoded)
+            f8_is_round_1 = 1.0 if round_num == 1 else 0.0
+            f9_is_round_2 = 1.0 if round_num == 2 else 0.0
+            f10_is_round_3 = 1.0 if round_num >= 3 else 0.0
 
             return np.array(
                 [
-                    player_health / MAX_HEALTH,  # Player health ratio
-                    enemy_health / MAX_HEALTH,  # Enemy health ratio
-                    (player_health - enemy_health) / MAX_HEALTH,  # Health difference
-                    round_num / 3.0,  # Round progress
-                    (timer if timer is not None else 99) / 99.0,  # Time remaining
-                    (
-                        1.0 if player_health < (MAX_HEALTH * 0.3) else 0.0
-                    ),  # Player critical
-                    1.0 if enemy_health < (MAX_HEALTH * 0.3) else 0.0,  # Enemy critical
-                    health_momentum_player,  # Player health change rate
-                    health_momentum_enemy,  # Enemy health change rate
-                    score_momentum,  # Score change rate (indicates successful attacks)
-                    recent_action_variety,  # Variety in recent actions
-                    health_ratio,  # Health advantage ratio
-                    health_sum,  # Total health remaining in fight
-                    health_urgency,  # How critical the fight state is
-                    (
-                        1.0 if abs(health_momentum_player) > 0.01 else 0.0
-                    ),  # Player recently damaged flag
+                    f1_player_health_norm,
+                    f2_enemy_health_norm,
+                    f3_health_advantage,
+                    f4_health_ratio,
+                    f5_total_health_pool,
+                    f6_player_is_critical,
+                    f7_enemy_is_critical,
+                    f8_is_round_1,
+                    f9_is_round_2,
+                    f10_is_round_3,
                 ],
                 dtype=np.float32,
             )
@@ -534,7 +408,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             import traceback
 
             print(f"   Full traceback: {traceback.format_exc()}")
-            return np.zeros(15, dtype=np.float32)
+            return np.zeros(10, dtype=np.float32)
 
     def _get_visual_features(self, observation: np.ndarray) -> Optional[torch.Tensor]:
         """Extract visual features with proper error handling"""
@@ -581,13 +455,24 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             return np.zeros(self.observation_space.shape, dtype=np.uint8)
 
     def reset(self, **kwargs) -> Tuple[np.ndarray, Dict]:
-        """Reset with comprehensive state initialization"""
+        """Reset with comprehensive state initialization and debugging"""
         try:
             obs, info = self.env.reset(**kwargs)
 
+            # Debug: Print initial game state
+            initial_health = info.get("health", MAX_HEALTH)
+            initial_enemy_health = info.get("enemy_health", MAX_HEALTH)
+            initial_score = info.get("score", 0)
+            initial_round = info.get("round", 1)
+
+            print(
+                f"   🔄 RESET: P:{initial_health}, E:{initial_enemy_health}, Score:{initial_score}, Round:{initial_round}"
+            )
+
             # Reset game state
-            self.prev_player_health = info.get("health", MAX_HEALTH)
-            self.prev_enemy_health = info.get("enemy_health", MAX_HEALTH)
+            self.prev_player_health = initial_health
+            self.prev_enemy_health = initial_enemy_health
+            self.prev_score = initial_score
             self.player_wins_in_episode = 0
             self.enemy_wins_in_episode = 0
 
@@ -625,7 +510,7 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             if self.feature_extractor is not None:
                 feature_dim = getattr(self.feature_extractor, "features_dim", 512)
                 zero_vf = torch.zeros(feature_dim, device=self.device)
-                zero_gs = np.zeros(15, dtype=np.float32)  # Updated for enhanced state
+                zero_gs = np.zeros(10, dtype=np.float32)  # Updated for simplified state
 
                 for _ in range(self.state_history_length):
                     self.visual_features_history.append(zero_vf.clone())
@@ -681,6 +566,9 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             self.prev_enemy_health = next_info.get(
                 "enemy_health", self.prev_enemy_health
             )
+            self.prev_score = next_info.get(
+                "score", self.prev_score
+            )  # Added for enhanced reward
 
             return (
                 self._get_stacked_observation(),
@@ -756,7 +644,6 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 self.damage_stats["enemy_damage_frames"] += 1
 
             # Define ground truth
-            # Define ground truth with original labels
             ground_truth = {
                 "will_opponent_attack": float(damage_to_player > 1),
                 "will_opponent_take_damage": float(damage_to_enemy > 1),
@@ -899,87 +786,130 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             print(f"   ⚠️ Stats printing failed: {e}")
 
     def _calculate_enhanced_reward(self, next_info: Dict) -> float:
-        """Calculate enhanced reward with improved balancing"""
+        """Calculate enhanced reward with better balance for learning"""
         try:
-            current_player_health = next_info.get("health", self.prev_player_health)
-            current_enemy_health = next_info.get("enemy_health", self.prev_enemy_health)
+            # 1. Get current and previous state variables
+            my_health = next_info.get("health", self.prev_player_health)
+            enemy_health = next_info.get("enemy_health", self.prev_enemy_health)
+            my_score = next_info.get("score", self.prev_score)
 
-            # Calculate damage components
-            damage_dealt = max(0, self.prev_enemy_health - current_enemy_health)
-            damage_taken = max(0, self.prev_player_health - current_player_health)
+            # 2. Calculate Core Deltas
+            damage_dealt = max(0, self.prev_enemy_health - enemy_health)
+            damage_taken = max(0, self.prev_player_health - my_health)
+            score_delta = max(0, my_score - self.prev_score)
 
-            # Base reward components
-            health_delta_reward = (damage_dealt * 1.0 - damage_taken * 1.2) * 0.1
-            time_reward = 0.001  # Small positive reward for survival
+            # 3. Base survival reward (small positive for staying alive)
+            survival_reward = 0.01
+
+            # 4. Health-based rewards (balanced to not be too harsh)
+            health_reward = 0.0
+            if damage_dealt > 0:
+                health_reward += (
+                    damage_dealt * 0.5 / MAX_HEALTH
+                )  # Reward for dealing damage
+            if damage_taken > 0:
+                health_reward -= (
+                    damage_taken * 0.3 / MAX_HEALTH
+                )  # Lighter penalty for taking damage
+
+            # 5. Score-based reward (encourage good moves)
+            score_reward = score_delta * 0.001 if score_delta > 0 else 0
+
+            # 6. Strategic multipliers (only for damage dealt)
+            if damage_dealt > 0:
+                # Aggression bonus when ahead
+                health_ratio = my_health / (enemy_health + 1e-6)
+                if health_ratio > 1.5:
+                    health_reward *= 1.3
+
+                # Comeback bonus when behind
+                if my_health < MAX_HEALTH * 0.4:
+                    health_reward *= 1.5
+
+            # 7. Win/Loss Rewards (check for round end)
             win_loss_reward = 0.0
-
-            # Bonus rewards
-            combo_bonus = 0.0
-            if damage_dealt > 10:  # Large damage combo
-                combo_bonus = 0.5
-
-            critical_health_penalty = 0.0
-            if current_player_health < (MAX_HEALTH * 0.2):  # Critical health
-                critical_health_penalty = -0.1
-
-            # Check for round end
-            if (current_player_health <= 0 or current_enemy_health <= 0) and (
+            round_ended = (my_health <= 0 or enemy_health <= 0) and (
                 self.prev_player_health > 0 and self.prev_enemy_health > 0
-            ):
-                if current_player_health > current_enemy_health:
-                    win_loss_reward = 20.0
-                    self.player_wins_in_episode += 1
-                else:
-                    win_loss_reward = -20.0
-                    self.enemy_wins_in_episode += 1
-
-            # Combine all reward components
-            enhanced_reward = (
-                health_delta_reward
-                + time_reward
-                + win_loss_reward
-                + combo_bonus
-                + critical_health_penalty
             )
 
-            return float(enhanced_reward)
+            if round_ended:
+                if my_health > enemy_health:
+                    win_loss_reward = 10.0  # Win bonus
+                    self.player_wins_in_episode += 1
+                    print(
+                        f"   🏆 ROUND WON! Player wins: {self.player_wins_in_episode}"
+                    )
+                else:
+                    win_loss_reward = -5.0  # Loss penalty (lighter)
+                    self.enemy_wins_in_episode += 1
+                    print(f"   💀 ROUND LOST! Enemy wins: {self.enemy_wins_in_episode}")
+
+            # 8. Combine all rewards
+            total_reward = (
+                survival_reward + health_reward + score_reward + win_loss_reward
+            )
+
+            # 9. Debug logging for significant events
+            if damage_dealt > 0 or damage_taken > 0 or win_loss_reward != 0:
+                # print(
+                #    f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, win_loss:{win_loss_reward:.1f})"
+                # )
+                pass
+
+            return float(total_reward)
 
         except Exception as e:
             print(f"   ⚠️ Reward calculation failed: {e}")
-            return 0.0
+            return 0.01  # Small positive default
 
     def _handle_episode_termination(
         self, terminated: bool, truncated: bool, next_info: Dict
     ) -> bool:
-        """Handle episode termination with proper statistics update"""
+        """Handle episode termination with better win/loss detection"""
         try:
             done = terminated or truncated
 
-            # Check for match end (best of 3)
-            if self.player_wins_in_episode >= 2 or self.enemy_wins_in_episode >= 2:
+            current_player = next_info.get("health", self.prev_player_health)
+            current_enemy = next_info.get("enemy_health", self.prev_enemy_health)
+
+            # Check for match end (best of 3) - be more permissive
+            match_ended = False
+            if self.player_wins_in_episode >= 2:
+                match_ended = True
+                self.current_stats["wins"] += 1
+                print(f"   🎉 MATCH WON! Total wins: {self.current_stats['wins']}")
+            elif self.enemy_wins_in_episode >= 2:
+                match_ended = True
+                self.current_stats["losses"] += 1
+                print(f"   😞 MATCH LOST! Total losses: {self.current_stats['losses']}")
+
+            # Also check if both players are at 0 health (draw/reset scenario)
+            if current_player <= 0 and current_enemy <= 0 and not match_ended:
+                # Treat as a loss if no clear winner
+                self.current_stats["losses"] += 1
+                match_ended = True
+
+            if match_ended:
                 done = True
-
-                # Update match statistics
-                if self.player_wins_in_episode > self.enemy_wins_in_episode:
-                    self.current_stats["wins"] += 1
-                else:
-                    self.current_stats["losses"] += 1
-
-                # Update total rounds and win rate
+                # Update statistics
                 self.current_stats["total_rounds"] = (
                     self.current_stats["wins"] + self.current_stats["losses"]
                 )
-
                 if self.current_stats["total_rounds"] > 0:
                     self.current_stats["win_rate"] = (
                         self.current_stats["wins"] / self.current_stats["total_rounds"]
                     )
 
+                # Log match result
+                print(
+                    f"   📊 Match Stats: {self.current_stats['wins']}W/{self.current_stats['losses']}L (WR: {self.current_stats['win_rate']*100:.1f}%)"
+                )
+
             return done
 
         except Exception as e:
             print(f"   ⚠️ Episode termination handling failed: {e}")
-            return True  # Safe default
+            return terminated or truncated  # Use original values as fallback
 
     def close(self):
         """Clean up resources"""

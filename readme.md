@@ -17,7 +17,7 @@ python train.py \
     --ent-coef 0.015 \
     --frame-stack 8 \
     --render \
-    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_850000_steps.zip
+    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_1100000_steps.zip
 
 
 
