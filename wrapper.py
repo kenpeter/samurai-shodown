@@ -396,8 +396,7 @@ class SamuraiJEPAWrapper(gym.Wrapper):
             # Reduced logging (every 500 frames instead of 100)
             if self._debug_counter % 500 == 0 or explicit_activity:
                 if explicit_activity:
-                    # print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
-                    pass
+                    print(f"   🟢 EXPLICIT ACTIVITY: {', '.join(activity_reasons)}")
                 elif is_active:
                     print(
                         f"   🟡 ASSUMED ACTIVE: Fight ongoing (P:{current_player}, E:{current_enemy}, R:{current_round})"
