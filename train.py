@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Training Script - ATTACK-ONLY PREDICTIONS
+JEPA-Enhanced Samurai Training Script - ANTI-SPAM COMPREHENSIVE FIXES
 """
 import os
 import argparse
@@ -32,7 +32,7 @@ class JEPATrainingCallback(BaseCallback):
         return True
 
     def _log_training_stats(self):
-        """Comprehensive logging with proper error handling"""
+        """Comprehensive logging with anti-spam metrics"""
         try:
             # --- Main Stats Logging ---
             all_current_stats = self.training_env.get_attr("current_stats")
@@ -40,7 +40,7 @@ class JEPATrainingCallback(BaseCallback):
                 stats = all_current_stats[0]
                 wins = stats.get("wins", 0)
                 losses = stats.get("losses", 0)
-                total_rounds = wins + losses  # Fixed: Calculate total_rounds properly
+                total_rounds = wins + losses
                 win_rate = (wins / total_rounds * 100) if total_rounds > 0 else 0
 
                 print(f"\n--- 📊 Training Status @ Step {self.num_timesteps:,} ---")
@@ -52,6 +52,9 @@ class JEPATrainingCallback(BaseCallback):
             if self.enable_jepa:
                 self._log_jepa_stats()
 
+            # --- NEW: Anti-Spam Statistics ---
+            self._log_anti_spam_stats()
+
             # --- System and Training Param Logging ---
             self._log_system_stats()
 
@@ -59,7 +62,7 @@ class JEPATrainingCallback(BaseCallback):
             print(f"   ⚠️ Logging error: {e}")
 
     def _log_jepa_stats(self):
-        """Log JEPA attack accuracy only"""
+        """Log JEPA strategic prediction accuracies"""
         try:
             all_strategic_stats = self.training_env.get_attr("strategic_stats")
             all_jepa_ready = self.training_env.get_attr("jepa_ready")
@@ -69,33 +72,77 @@ class JEPATrainingCallback(BaseCallback):
                 jepa_ready = all_jepa_ready[0] if all_jepa_ready else False
 
                 if jepa_ready and strat_stats:
-                    predictions_made = strat_stats.get("attack_predictions_made", 0)
+                    predictions_made = strat_stats.get("strategic_predictions_made", 0)
 
                     if predictions_made > 0:
-                        print(
-                            f"   🔮 JEPA Attack Predictions Made: {predictions_made:,}"
-                        )
+                        print(f"   🔮 JEPA Predictions Made: {predictions_made:,}")
 
-                        # Show attack accuracy
-                        attack_accuracy = strat_stats.get("attack_accuracy", 0.5)
-                        attack_predictions = strat_stats.get("attack_predictions", 0)
-                        attack_correct = strat_stats.get("attack_correct", 0)
-
-                        print(
-                            f"      • Attack Timing: {attack_accuracy*100:.1f}% ({attack_correct}/{attack_predictions})"
+                        # Show strategic accuracies
+                        strategic_accuracies = strat_stats.get(
+                            "strategic_accuracies", {}
                         )
+                        strategic_predictions = strat_stats.get(
+                            "strategic_predictions", {}
+                        )
+                        strategic_correct = strat_stats.get("strategic_correct", {})
+
+                        if strategic_accuracies:
+                            print("   📊 Strategic Prediction Accuracies:")
+                            for outcome, accuracy in strategic_accuracies.items():
+                                total_preds = strategic_predictions.get(outcome, 0)
+                                total_correct = strategic_correct.get(outcome, 0)
+                                # Create readable outcome names
+                                readable_name = (
+                                    outcome.replace("is_best_time_to_", "")
+                                    .replace("_", " ")
+                                    .title()
+                                )
+                                print(
+                                    f"      • {readable_name}: {accuracy*100:.1f}% ({total_correct}/{total_preds})"
+                                )
                     else:
-                        print("   🔮 JEPA: Ready, awaiting attack predictions...")
+                        print("   🔮 JEPA: Ready, awaiting predictions...")
                 else:
-                    print("   🔮 JEPA: Initializing attack predictor...")
+                    print("   🔮 JEPA: Initializing predictor...")
         except Exception as e:
             print(f"   ⚠️ JEPA logging error: {e}")
+
+    def _log_anti_spam_stats(self):
+        """NEW: Log anti-spam statistics to monitor agent behavior"""
+        try:
+            all_strategic_stats = self.training_env.get_attr("strategic_stats")
+
+            if all_strategic_stats and len(all_strategic_stats) > 0:
+                strat_stats = all_strategic_stats[0]
+
+                spam_penalties = strat_stats.get("spam_penalties_applied", 0)
+                defensive_spam = strat_stats.get("defensive_spam_detected", 0)
+                variety_rewards = strat_stats.get("action_variety_rewards", 0)
+
+                # Only log if there's meaningful anti-spam activity
+                if spam_penalties > 0 or variety_rewards > 0:
+                    print(f"   🚫 Anti-Spam Report:")
+                    print(f"      Spam Penalties Applied: {spam_penalties}")
+                    print(f"      Defensive Spam Detected: {defensive_spam}")
+                    print(f"      Action Variety Rewards: {variety_rewards}")
+
+                    # Calculate spam rate
+                    active_frames = strat_stats.get("game_active_frames", 1)
+                    spam_rate = (
+                        (spam_penalties / active_frames * 1000)
+                        if active_frames > 0
+                        else 0
+                    )
+                    print(f"      Spam Rate: {spam_rate:.2f} per 1000 frames")
+
+        except Exception as e:
+            print(f"   ⚠️ Anti-spam logging error: {e}")
 
     def _log_system_stats(self):
         """Log system and training parameters"""
         try:
             print(
-                f"   🧠 Arch: {'JEPA+Transformer' if self.enable_jepa else 'Standard CNN'}"
+                f"   🧠 Arch: {'JEPA+Transformer+AntiSpam' if self.enable_jepa else 'Standard CNN+AntiSpam'}"
             )
 
             if torch.cuda.is_available():
@@ -143,7 +190,7 @@ def make_env(game, state_path, render_mode, frame_stack, enable_jepa):
 def parse_arguments():
     """Parse command line arguments with validation"""
     parser = argparse.ArgumentParser(
-        description="JEPA Enhanced Fighting Game AI Training - Attack Only"
+        description="JEPA Enhanced Fighting Game AI Training with Anti-Spam"
     )
     parser.add_argument(
         "--total-timesteps",
@@ -185,14 +232,17 @@ def parse_arguments():
 
 
 def setup_model(env, args, device, save_dir):
-    """Setup PPO model with proper configuration"""
+    """Setup PPO model with enhanced anti-spam configuration"""
+    # ENHANCED: Policy kwargs with stronger regularization to encourage exploration
     policy_kwargs = dict(
         features_extractor_class=JEPAEnhancedCNN,
         features_extractor_kwargs=dict(features_dim=512),
-        net_arch=dict(pi=[256, 128], vf=[256, 128]),  # Slightly deeper network
+        net_arch=dict(pi=[256, 128], vf=[256, 128]),
         activation_fn=nn.ReLU,
         optimizer_class=torch.optim.AdamW,
-        optimizer_kwargs=dict(eps=1e-5, weight_decay=1e-4),
+        optimizer_kwargs=dict(
+            eps=1e-5, weight_decay=1e-4
+        ),  # Weight decay helps prevent overfitting to spam
     )
 
     if args.resume and os.path.exists(args.resume):
@@ -217,7 +267,7 @@ def setup_model(env, args, device, save_dir):
 
 
 def create_new_model(env, args, policy_kwargs, save_dir, device):
-    """Create a new PPO model"""
+    """Create a new PPO model with anti-spam friendly hyperparameters"""
     return PPO(
         "CnnPolicy",
         env,
@@ -228,8 +278,8 @@ def create_new_model(env, args, policy_kwargs, save_dir, device):
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        clip_range_vf=None,  # Let it adapt automatically
-        ent_coef=args.ent_coef,
+        clip_range_vf=None,
+        ent_coef=args.ent_coef,  # Higher entropy encourages exploration/variety
         vf_coef=0.5,
         max_grad_norm=0.5,
         learning_rate=args.lr,
@@ -252,7 +302,7 @@ def inject_jepa_feature_extractor(env, model, enable_jepa):
 
         if hasattr(wrapper_env, "inject_feature_extractor"):
             wrapper_env.inject_feature_extractor(model.policy.features_extractor)
-            print("   ✅ JEPA attack prediction system fully initialized!")
+            print("   ✅ JEPA system fully initialized with anti-spam features!")
         else:
             print(f"   ⚠️ Warning: Could not find inject_feature_extractor method")
             print(f"   Environment type: {type(wrapper_env)}")
@@ -261,25 +311,62 @@ def inject_jepa_feature_extractor(env, model, enable_jepa):
                 for attr in dir(wrapper_env)
                 if not attr.startswith("_") and callable(getattr(wrapper_env, attr))
             ]
-            print(f"   Available methods: {available_methods[:10]}...")  # Show first 10
+            print(f"   Available methods: {available_methods[:10]}...")
 
     except Exception as e:
         print(f"   ❌ JEPA injection failed: {e}")
         print("   Training will continue without JEPA features")
 
 
+def validate_anti_spam_setup(env):
+    """NEW: Validate that anti-spam features are properly configured"""
+    try:
+        print("   🔍 Validating anti-spam setup...")
+
+        # Check if wrapper has anti-spam attributes
+        monitor_env = env.envs[0]
+        wrapper_env = monitor_env.env
+
+        required_attributes = [
+            "_consecutive_action_count",
+            "_action_variety_history",
+            "_spam_penalty_active",
+            "_track_action_variety",
+            "_calculate_action_variety_score",
+        ]
+
+        missing_attributes = []
+        for attr in required_attributes:
+            if not hasattr(wrapper_env, attr):
+                missing_attributes.append(attr)
+
+        if missing_attributes:
+            print(f"   ⚠️ Warning: Missing anti-spam attributes: {missing_attributes}")
+            return False
+        else:
+            print("   ✅ Anti-spam features properly configured")
+            return True
+
+    except Exception as e:
+        print(f"   ⚠️ Anti-spam validation failed: {e}")
+        return False
+
+
 def main():
-    """Main training loop with comprehensive error handling"""
+    """Main training loop with comprehensive anti-spam error handling"""
     try:
         args = parse_arguments()
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        mode_name = "JEPA Attack-Only" if args.enable_jepa else "Standard CNN"
+        mode_name = (
+            "JEPA Enhanced Anti-Spam" if args.enable_jepa else "Standard CNN Anti-Spam"
+        )
 
-        print(f"🚀 Starting {mode_name} Training")
+        print(f"🚀 Starting {mode_name} Training (ANTI-SPAM COMPREHENSIVE FIXES)")
         print(f"   💻 Device: {device.upper()}")
         print(f"   🎯 Timesteps: {args.total_timesteps:,}")
         print(f"   📚 Frame Stack: {args.frame_stack}")
         print(f"   🧠 JEPA Enabled: {args.enable_jepa}")
+        print(f"   🚫 Anti-Spam: ENABLED")
 
         # Setup game and state
         game, state_filename = "SamuraiShodown-Genesis", "samurai.state"
@@ -300,8 +387,13 @@ def main():
             ]
         )
 
+        # NEW: Validate anti-spam setup
+        anti_spam_ok = validate_anti_spam_setup(env)
+        if not anti_spam_ok:
+            print("   ⚠️ Warning: Anti-spam validation failed, but continuing...")
+
         # Setup directories
-        save_dir = "trained_models_jepa_attack_only"
+        save_dir = "trained_models_jepa_anti_spam"
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(f"{save_dir}_logs", exist_ok=True)
 
@@ -315,22 +407,27 @@ def main():
         checkpoint_callback = CheckpointCallback(
             save_freq=max(50000, args.n_steps),
             save_path=save_dir,
-            name_prefix="ppo_jepa_attack_only",
+            name_prefix="ppo_jepa_anti_spam",
         )
         training_callback = JEPATrainingCallback(enable_jepa=args.enable_jepa)
 
         # Training loop
-        print("\n🎯 Starting training...")
+        print("\n🎯 Starting training with anti-spam monitoring...")
         model.learn(
             total_timesteps=args.total_timesteps,
             callback=[checkpoint_callback, training_callback],
             reset_num_timesteps=not bool(args.resume),
         )
 
+        print("\n🎉 Training completed successfully!")
+
     except KeyboardInterrupt:
         print("\n⏸️ Training interrupted by user")
     except Exception as e:
         print(f"\n❌ Training failed: {e}")
+        import traceback
+
+        print(f"Full traceback: {traceback.format_exc()}")
         raise
     finally:
         # Cleanup
@@ -339,15 +436,16 @@ def main():
                 env.close()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            print("   🧹 Cleanup completed")
         except Exception as e:
             print(f"⚠️ Cleanup warning: {e}")
 
     # Save final model
     try:
         if "model" in locals():
-            final_path = os.path.join(save_dir, "final_model.zip")
+            final_path = os.path.join(save_dir, "final_model_anti_spam.zip")
             model.save(final_path)
-            print(f"💾 Final model saved to {final_path}")
+            print(f"💾 Final anti-spam model saved to {final_path}")
     except Exception as e:
         print(f"⚠️ Failed to save final model: {e}")
 
