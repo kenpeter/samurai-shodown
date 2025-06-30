@@ -643,9 +643,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 # Log significant attack events
                 if actual_label == 1:
                     result_str = "✅ CORRECT" if is_correct else "❌ MISSED"
-                    print(
-                        f"      ⚔️ ATTACK OPPORTUNITY: {result_str}, prob={predicted_prob:.3f}, damage={damage_to_enemy}"
-                    )
+                    # print(
+                    #     f"      ⚔️ ATTACK OPPORTUNITY: {result_str}, prob={predicted_prob:.3f}, damage={damage_to_enemy}"
+                    # )
+                    pass
 
                 # Update statistics
                 if is_correct:
@@ -797,9 +798,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 or damage_taken > 5
                 or attack_bonus > 0
             ):
-                print(
-                    f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, attack_bonus:{attack_bonus:.1f}, win_loss:{win_loss_reward:.1f})"
-                )
+                # print(
+                #     f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, attack_bonus:{attack_bonus:.1f}, win_loss:{win_loss_reward:.1f})"
+                # )
+                pass
 
             return float(total_reward)
 
