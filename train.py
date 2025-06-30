@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA-Enhanced Samurai Training Script - COMPREHENSIVE FIXES
+JEPA-Enhanced Samurai Training Script - ATTACK-ONLY PREDICTIONS
 """
 import os
 import argparse
@@ -59,7 +59,7 @@ class JEPATrainingCallback(BaseCallback):
             print(f"   ⚠️ Logging error: {e}")
 
     def _log_jepa_stats(self):
-        """Log JEPA individual accuracies only"""
+        """Log JEPA attack accuracy only"""
         try:
             all_strategic_stats = self.training_env.get_attr("strategic_stats")
             all_jepa_ready = self.training_env.get_attr("jepa_ready")
@@ -69,38 +69,25 @@ class JEPATrainingCallback(BaseCallback):
                 jepa_ready = all_jepa_ready[0] if all_jepa_ready else False
 
                 if jepa_ready and strat_stats:
-                    predictions_made = strat_stats.get("binary_predictions_made", 0)
+                    predictions_made = strat_stats.get("attack_predictions_made", 0)
 
                     if predictions_made > 0:
-                        print(f"   🔮 JEPA Predictions Made: {predictions_made:,}")
-
-                        # Show individual accuracies
-                        individual_accuracies = strat_stats.get(
-                            "individual_accuracies", {}
+                        print(
+                            f"   🔮 JEPA Attack Predictions Made: {predictions_made:,}"
                         )
-                        individual_predictions = strat_stats.get(
-                            "individual_predictions", {}
-                        )
-                        individual_correct = strat_stats.get("individual_correct", {})
 
-                        if individual_accuracies:
-                            print("   📊 Individual Prediction Accuracies:")
-                            for outcome, accuracy in individual_accuracies.items():
-                                total_preds = individual_predictions.get(outcome, 0)
-                                total_correct = individual_correct.get(outcome, 0)
-                                # Create readable outcome names
-                                readable_name = (
-                                    outcome.replace("will_", "")
-                                    .replace("_", " ")
-                                    .title()
-                                )
-                                print(
-                                    f"      • {readable_name}: {accuracy*100:.1f}% ({total_correct}/{total_preds})"
-                                )
+                        # Show attack accuracy
+                        attack_accuracy = strat_stats.get("attack_accuracy", 0.5)
+                        attack_predictions = strat_stats.get("attack_predictions", 0)
+                        attack_correct = strat_stats.get("attack_correct", 0)
+
+                        print(
+                            f"      • Attack Timing: {attack_accuracy*100:.1f}% ({attack_correct}/{attack_predictions})"
+                        )
                     else:
-                        print("   🔮 JEPA: Ready, awaiting predictions...")
+                        print("   🔮 JEPA: Ready, awaiting attack predictions...")
                 else:
-                    print("   🔮 JEPA: Initializing predictor...")
+                    print("   🔮 JEPA: Initializing attack predictor...")
         except Exception as e:
             print(f"   ⚠️ JEPA logging error: {e}")
 
@@ -156,7 +143,7 @@ def make_env(game, state_path, render_mode, frame_stack, enable_jepa):
 def parse_arguments():
     """Parse command line arguments with validation"""
     parser = argparse.ArgumentParser(
-        description="JEPA Enhanced Fighting Game AI Training"
+        description="JEPA Enhanced Fighting Game AI Training - Attack Only"
     )
     parser.add_argument(
         "--total-timesteps",
@@ -265,7 +252,7 @@ def inject_jepa_feature_extractor(env, model, enable_jepa):
 
         if hasattr(wrapper_env, "inject_feature_extractor"):
             wrapper_env.inject_feature_extractor(model.policy.features_extractor)
-            print("   ✅ JEPA system fully initialized!")
+            print("   ✅ JEPA attack prediction system fully initialized!")
         else:
             print(f"   ⚠️ Warning: Could not find inject_feature_extractor method")
             print(f"   Environment type: {type(wrapper_env)}")
@@ -286,9 +273,9 @@ def main():
     try:
         args = parse_arguments()
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        mode_name = "JEPA Enhanced" if args.enable_jepa else "Standard CNN"
+        mode_name = "JEPA Attack-Only" if args.enable_jepa else "Standard CNN"
 
-        print(f"🚀 Starting {mode_name} Training (COMPREHENSIVE FIXES)")
+        print(f"🚀 Starting {mode_name} Training")
         print(f"   💻 Device: {device.upper()}")
         print(f"   🎯 Timesteps: {args.total_timesteps:,}")
         print(f"   📚 Frame Stack: {args.frame_stack}")
@@ -314,7 +301,7 @@ def main():
         )
 
         # Setup directories
-        save_dir = "trained_models_jepa_reward_shaped"
+        save_dir = "trained_models_jepa_attack_only"
         os.makedirs(save_dir, exist_ok=True)
         os.makedirs(f"{save_dir}_logs", exist_ok=True)
 
@@ -328,7 +315,7 @@ def main():
         checkpoint_callback = CheckpointCallback(
             save_freq=max(50000, args.n_steps),
             save_path=save_dir,
-            name_prefix="ppo_jepa_shaped",
+            name_prefix="ppo_jepa_attack_only",
         )
         training_callback = JEPATrainingCallback(enable_jepa=args.enable_jepa)
 

@@ -1,15 +1,3 @@
-# Stage 1: Initial learning
-python train.py --enable-jepa --total-timesteps 5000000 --ent-coef 0.15
-
-# Stage 2: Refinement
-python train.py --enable-jepa --resume trained_models_jepa_prime/ppo_jepa_prime_final.zip \
-  --total-timesteps 10000000 --ent-coef 0.08 --learning-rate 1.0e-4
-
-
-
-
-
-# Quick visual check (shorter session)
 python train.py \
     --total-timesteps 5000000 \
     --n-steps 4096 \
@@ -17,7 +5,9 @@ python train.py \
     --lr 0.00025 \
     --ent-coef 0.01 \
     --frame-stack 8 \
-    --resume trained_models_jepa_reward_shaped/ppo_jepa_shaped_3200000_steps.zip
+    --resume trained_models_jepa_attack_only/ppo_jepa_attack_only_7400000_steps.zip
+
+    
 
 
 Input Observation: (batch, channels, height, width)
@@ -36,3 +26,20 @@ Transformer Output: (1, seq_len, d_model)
 Final Representation: (1, d_model) [last timestep]
 ↓
 Predictions: (1, prediction_horizon) for each outcome
+
+
+
+
+
+
+# Evaluate with JEPA features and rendering
+python eval.py trained_models_jepa_reward_shaped/ppo_jepa_shaped_7400000_steps.zip --episodes 5 --render
+
+# Quick evaluation without rendering
+python eval.py trained_models_jepa_reward_shaped/ppo_jepa_shaped_7400000_steps.zip --episodes 10
+
+# Evaluate without JEPA (standard CNN mode)
+python eval.py trained_models_jepa_reward_shaped/ppo_jepa_shaped_7400000_steps.zip --no-jepa --episodes 10
+
+# Save results to JSON
+python eval.py trained_models_jepa_reward_shaped/ppo_jepa_shaped_7400000_steps.zip --episodes 20 --output results.json

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JEPA Model Performance Evaluation Script - CORRECTED VERSION
+JEPA Model Performance Evaluation Script - UPDATED FOR CURRENT WRAPPER
 """
 import os
 import argparse
@@ -20,7 +20,8 @@ except ImportError:
         raise ImportError("Neither stable-retro nor retro found.")
 
 from stable_baselines3 import PPO
-from wrapper import SamuraiJEPAWrapper
+from stable_baselines3.common.monitor import Monitor
+from wrapper import SamuraiJEPAWrapperImproved  # Updated wrapper name
 
 
 def evaluate_model(
@@ -36,11 +37,11 @@ def evaluate_model(
         print(f"   🧠 JEPA: {enable_jepa}")
         print(f"   👁️ Render: {render}")
 
-    # --- Create Environment (with corrected state path) ---
+    # --- Create Environment ---
     try:
         game = "SamuraiShodown-Genesis"
 
-        # **FIX 1: Use absolute path for the state file**
+        # Use absolute path for the state file
         state_filename = "samurai.state"
         if os.path.exists(state_filename):
             state_path = os.path.abspath(state_filename)
@@ -59,11 +60,16 @@ def evaluate_model(
             render_mode="human" if render else None,
         )
 
-        env = SamuraiJEPAWrapper(
+        # Updated wrapper with correct parameters
+        env = SamuraiJEPAWrapperImproved(
             env,
-            frame_stack=6,
+            frame_stack=8,  # Match training parameters
             enable_jepa=enable_jepa,
         )
+
+        # Add Monitor for episode tracking
+        env = Monitor(env)
+
         if verbose:
             print(f"✅ Environment created successfully")
 
@@ -82,12 +88,23 @@ def evaluate_model(
         env.close()
         return None
 
-    # **FIX 2: Inject the feature extractor into the wrapper if JEPA is enabled**
+    # Updated JEPA injection for current wrapper
     if enable_jepa:
-        # The environment object is not a VecEnv, so we access the wrapper directly
-        env.unwrapped.feature_extractor = model.policy.features_extractor
-        if verbose:
-            print("   💉 Injected PPO feature extractor into JEPA wrapper.")
+        try:
+            # Access the wrapper directly (before Monitor wrapper)
+            wrapper_env = env.env  # Get past Monitor wrapper
+            if hasattr(wrapper_env, "inject_feature_extractor"):
+                wrapper_env.inject_feature_extractor(model.policy.features_extractor)
+                if verbose:
+                    print("   💉 Injected PPO feature extractor into JEPA wrapper.")
+            else:
+                if verbose:
+                    print(
+                        "   ⚠️ JEPA injection not available - running without JEPA features"
+                    )
+        except Exception as e:
+            if verbose:
+                print(f"   ⚠️ JEPA injection failed: {e}")
 
     # --- Evaluation Loop ---
     stats = {
@@ -95,14 +112,19 @@ def evaluate_model(
         "losses": 0,
         "episode_rewards": [],
         "episode_lengths": [],
+        "strategic_stats": {
+            "attack_accuracy": [],
+            "defense_accuracy": [],
+        },
     }
 
     start_time = time.time()
     for episode in range(num_episodes):
-        obs, _ = env.reset()
+        obs, info = env.reset()
         done = False
         episode_reward = 0
         episode_length = 0
+        episode_start_time = time.time()
 
         while not done:
             action, _states = model.predict(obs, deterministic=True)
@@ -110,31 +132,60 @@ def evaluate_model(
 
             episode_reward += reward
             episode_length += 1
+
             if done or truncated:
                 break
 
-        # Update stats from the final info dict
+        # Extract final stats from wrapper
+        final_stats = info.get("current_stats", {})
+        strategic_stats = info.get("strategic_stats", {})
+
+        # Update episode stats
         stats["episode_rewards"].append(episode_reward)
         stats["episode_lengths"].append(episode_length)
 
-        # The wrapper's `current_stats` holds the win/loss record
-        final_stats = info.get("current_stats", {})
-        # Note: We aggregate wins/losses after all episodes are done for simplicity
+        # Determine episode outcome from wrapper stats
+        episode_wins = final_stats.get("wins", 0)
+        episode_losses = final_stats.get("losses", 0)
+
+        # Check if this episode resulted in a win or loss
+        # (Compare with previous totals if we had them, or use heuristics)
+        outcome = "DRAW"
+        if episode_reward > 0:  # Positive reward generally indicates winning
+            outcome = "WIN"
+            stats["wins"] += 1
+        else:
+            outcome = "LOSS"
+            stats["losses"] += 1
+
+        # Extract JEPA accuracy if available
+        if enable_jepa and strategic_stats:
+            accuracies = strategic_stats.get("strategic_accuracies", {})
+            if accuracies:
+                attack_acc = accuracies.get("is_best_time_to_attack", 0) * 100
+                defense_acc = accuracies.get("is_best_time_to_defend", 0) * 100
+                stats["strategic_stats"]["attack_accuracy"].append(attack_acc)
+                stats["strategic_stats"]["defense_accuracy"].append(defense_acc)
+
+        episode_time = time.time() - episode_start_time
 
         if verbose:
-            outcome = "Unknown"
-            # Determine outcome based on health from the final step's info
-            if info.get("game_info", {}).get("player_health", 0) > info.get(
-                "game_info", {}
-            ).get("opponent_health", 0):
-                outcome = "WIN"
-                stats["wins"] += 1
+            if enable_jepa and strategic_stats:
+                accuracies = strategic_stats.get("strategic_accuracies", {})
+                attack_acc = accuracies.get("is_best_time_to_attack", 0) * 100
+                defense_acc = accuracies.get("is_best_time_to_defend", 0) * 100
+                print(
+                    f"   Episode {episode+1:2d}/{num_episodes}: {outcome:4s} | "
+                    f"Reward: {episode_reward:6.1f} | Length: {episode_length:4d} | "
+                    f"Attack: {attack_acc:.1f}% | Defense: {defense_acc:.1f}% | "
+                    f"Time: {episode_time:.1f}s"
+                )
             else:
-                outcome = "LOSS"
-                stats["losses"] += 1
-            print(
-                f"   Episode {episode+1:2d}/{num_episodes}: {outcome:4s} | Reward: {episode_reward:6.1f} | Length: {episode_length:4d}"
-            )
+                print(
+                    f"   Episode {episode+1:2d}/{num_episodes}: {outcome:4s} | "
+                    f"Reward: {episode_reward:6.1f} | Length: {episode_length:4d} | "
+                    f"Time: {episode_time:.1f}s"
+                )
 
     # --- Final Analysis ---
     env.close()
@@ -145,6 +196,13 @@ def evaluate_model(
     avg_reward = np.mean(stats["episode_rewards"]) if total_episodes > 0 else 0
     avg_length = np.mean(stats["episode_lengths"]) if total_episodes > 0 else 0
 
+    # Calculate JEPA accuracy averages
+    avg_attack_acc = 0
+    avg_defense_acc = 0
+    if enable_jepa and stats["strategic_stats"]["attack_accuracy"]:
+        avg_attack_acc = np.mean(stats["strategic_stats"]["attack_accuracy"])
+        avg_defense_acc = np.mean(stats["strategic_stats"]["defense_accuracy"])
+
     # Print final results
     if verbose:
         print(f"\n📊 EVALUATION RESULTS ({total_time:.1f}s total)")
@@ -154,6 +212,11 @@ def evaluate_model(
         print(f"   🏆 Average Reward: {avg_reward:.2f}")
         print(f"   📏 Average Length: {avg_length:.0f} steps")
 
+        if enable_jepa and avg_attack_acc > 0:
+            print(f"\n🧠 JEPA STRATEGIC PERFORMANCE:")
+            print(f"   ⚔️ Attack Timing Accuracy: {avg_attack_acc:.1f}%")
+            print(f"   🛡️ Defense Timing Accuracy: {avg_defense_acc:.1f}%")
+
     results_dict = {
         "model_path": model_path,
         "num_episodes": num_episodes,
@@ -162,6 +225,9 @@ def evaluate_model(
         "avg_length": avg_length,
         "wins": stats["wins"],
         "losses": stats["losses"],
+        "avg_attack_accuracy": avg_attack_acc,
+        "avg_defense_accuracy": avg_defense_acc,
+        "evaluation_time": total_time,
     }
 
     return results_dict
@@ -212,8 +278,11 @@ def main():
             json.dump(serializable_results, f, indent=2)
         print(f"\n💾 Results saved to {args.output}")
 
-    # Quick performance assessment
+    # Performance assessment with JEPA considerations
     win_rate = results["win_rate"]
+    attack_acc = results.get("avg_attack_accuracy", 0)
+    defense_acc = results.get("avg_defense_accuracy", 0)
+
     if win_rate >= 0.7:
         performance = "🏆 EXCELLENT"
     elif win_rate >= 0.6:
@@ -226,6 +295,18 @@ def main():
         performance = "📚 NEEDS MORE TRAINING"
 
     print(f"\nPERFORMANCE: {performance} (Win Rate: {win_rate*100:.1f}%)")
+
+    if attack_acc > 0:
+        if attack_acc >= 80 and defense_acc >= 60:
+            jepa_performance = "🧠 JEPA: EXCELLENT STRATEGIC AWARENESS"
+        elif attack_acc >= 70 and defense_acc >= 40:
+            jepa_performance = "🧠 JEPA: GOOD STRATEGIC LEARNING"
+        elif attack_acc >= 60:
+            jepa_performance = "🧠 JEPA: DEVELOPING STRATEGIC SKILLS"
+        else:
+            jepa_performance = "🧠 JEPA: BASIC STRATEGIC UNDERSTANDING"
+
+        print(jepa_performance)
 
 
 if __name__ == "__main__":
