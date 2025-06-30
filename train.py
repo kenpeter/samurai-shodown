@@ -1,946 +1,515 @@
+#!/usr/bin/env python3
+"""
+train.py - Complete Training Script for Vision Pipeline Fighting Game AI
+Optimized for 180×128 resolution with OpenCV detection + CNN + Vision Transformer
+"""
+
 import os
-import sys
 import argparse
 import time
-import math
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
-import psutil
-from typing import Dict, Any, Optional, Type, Union, List
-from collections import deque
+import retro
 
-# Use stable-retro for gymnasium compatibility
-try:
-    import stable_retro as retro
-
-    print("🎮 Using stable-retro (gymnasium compatible)")
-except ImportError:
-    try:
-        import retro
-
-        print("🎮 Using retro (legacy)")
-    except ImportError:
-        raise ImportError(
-            "Neither stable-retro nor retro found. Install with: pip install stable-retro"
-        )
-
-import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback, BaseCallback
-from stable_baselines3.common.policies import ActorCriticCnnPolicy
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
 from stable_baselines3.common.vec_env import DummyVecEnv
 
-# Import JEPA-enhanced components
-from wrapper import (
-    SamuraiJEPAWrapper,
-    JEPAEnhancedCNN,
-    JEPASimpleBinaryPredictor,
-    SimpleBinaryResponsePlanner,
-)
+from wrapper import VisionPipelineWrapper, JEPAEnhancedCNN
 
 
-class JEPAPRIMEModel(nn.Module):
-    """
-    Combined JEPA + PRIME model for strategic fighting game AI
-    Integrates opponent state prediction with process reward modeling
-    """
+class VisionPipelineCallback(BaseCallback):
+    """Callback to monitor vision pipeline training progress"""
 
-    def __init__(
-        self,
-        feature_extractor_class,
-        feature_extractor_kwargs,
-        action_space_size,
-        enable_jepa=True,
-        prediction_horizon=6,  # Fixed to 6 frames to match frame_stack
-    ):
-        super().__init__()
-
-        # Create observation space for feature extractor
-        dummy_obs_space = gym.spaces.Box(
-            low=0,
-            high=255,
-            shape=(18, 180, 126),  # 6 frames * 3 channels
-            dtype=np.uint8,
-        )
-
-        self.feature_extractor = feature_extractor_class(
-            dummy_obs_space, **feature_extractor_kwargs
-        )
-
-        features_dim = feature_extractor_kwargs["features_dim"]
-        self.enable_jepa = enable_jepa
-        self.prediction_horizon = prediction_horizon
-
-        # PRIME Process Reward Model
-        self.process_head = nn.Sequential(
-            nn.Linear(features_dim, 256),
-            nn.ReLU(inplace=True),
-            nn.Linear(256, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 1),
-        )
-
-        # JEPA components for binary outcome prediction
-        if self.enable_jepa:
-            self.jepa_predictor = JEPASimpleBinaryPredictor(
-                visual_dim=features_dim,
-                sequence_length=8,
-                prediction_horizon=self.prediction_horizon,
-                game_state_dim=8,
-            )
-
-            self.response_planner = SimpleBinaryResponsePlanner(
-                visual_dim=features_dim,
-                agent_action_dim=action_space_size,
-                planning_horizon=self.prediction_horizon,
-            )
-
-            # Strategic value estimator (combines PRIME + Binary JEPA insights)
-            self.strategic_value = nn.Sequential(
-                nn.Linear(
-                    features_dim + 4 * self.prediction_horizon, 256
-                ),  # features + 4 binary predictions × horizon
-                nn.ReLU(inplace=True),
-                nn.Linear(256, 128),
-                nn.ReLU(inplace=True),
-                nn.Linear(128, 1),
-                nn.Tanh(),
-            )
-
-        self.register_buffer("beta", torch.tensor(1.0))
-
-        print(f"🧠 JEPA + PRIME Model initialized:")
-        print(f"   📊 Features dim: {features_dim}")
-        print(f"   🎮 Action space: {action_space_size}")
-        print(f"   🔮 JEPA enabled: {self.enable_jepa}")
-        if self.enable_jepa:
-            print(
-                f"   🔢 Binary outcome prediction: 4 types (Expected 60-80% accuracy)"
-            )
-            print(f"   ⚔️ Strategic response planning: Enabled")
-            print(f"   🏆 Enhanced value estimation: Enabled")
-            print(f"   📈 Prediction horizon: {self.prediction_horizon} frames")
-
-    def forward(self, observations, actions=None, binary_outcome_history=None):
-        """
-        Forward pass combining PRIME and Binary JEPA
-
-        Args:
-            observations: Current visual observations
-            actions: Current actions (for process reward)
-            binary_outcome_history: Historical binary outcomes for JEPA prediction
-
-        Returns:
-            Dictionary with process rewards, predictions, and strategic values
-        """
-        features = self.feature_extractor(observations)
-
-        # PRIME process reward
-        process_reward = self.process_head(features)
-
-        output = {"process_reward": process_reward.squeeze(-1), "features": features}
-
-        # Binary JEPA predictions and strategic analysis
-        if self.enable_jepa and binary_outcome_history is not None:
-            try:
-                # Mock game state features (in practice, extract from observations)
-                batch_size = observations.shape[0]
-                game_state_features = torch.randn(
-                    batch_size, 8, device=observations.device
-                )
-
-                # Predict binary outcomes
-                binary_predictions, confidence = self.jepa_predictor(
-                    features, game_state_features, binary_outcome_history
-                )
-
-                # Plan strategic responses
-                response_actions, expected_values = self.response_planner.plan_response(
-                    features, game_state_features, binary_predictions, confidence
-                )
-
-                # Strategic value estimation
-                # Flatten binary predictions for value estimation
-                pred_values = []
-                for pred_type in [
-                    "will_opponent_attack",
-                    "will_opponent_take_damage",
-                    "will_player_take_damage",
-                    "will_round_end_soon",
-                ]:
-                    if pred_type in binary_predictions:
-                        pred_values.append(binary_predictions[pred_type])
-
-                if pred_values:
-                    pred_flat = torch.cat(pred_values, dim=-1)  # (batch, 4*horizon)
-                    strategic_input = torch.cat([features, pred_flat], dim=-1)
-                    strategic_value = self.strategic_value(strategic_input)
-
-                    output.update(
-                        {
-                            "binary_predictions": binary_predictions,
-                            "prediction_confidence": confidence,
-                            "planned_responses": response_actions,
-                            "expected_response_values": expected_values,
-                            "strategic_value": strategic_value.squeeze(-1),
-                        }
-                    )
-
-            except Exception as e:
-                print(f"Binary JEPA forward pass error: {e}")
-                # Fallback to PRIME-only mode
-                pass
-
-        return output
-
-    def compute_log_ratio(self, observations, reference_model=None):
-        """Compute log ratio for PRIME algorithm"""
-        features = self.feature_extractor(observations)
-        log_ratio = self.process_head(features)
-        return log_ratio.squeeze(-1)
-
-
-class JEPAPRIMETrainingCallback(BaseCallback):
-    """
-    Advanced callback for JEPA + PRIME training with comprehensive monitoring
-    """
-
-    def __init__(self, jepa_prime_model=None, enable_jepa=True, verbose=0):
-        super(JEPAPRIMETrainingCallback, self).__init__(verbose)
-        self.jepa_prime_model = jepa_prime_model
-        self.enable_jepa = enable_jepa
-        self.last_stats_log = 0
-
-        # Training metrics
-        self.process_rewards_history = deque(maxlen=1000)
-        self.outcome_rewards_history = deque(maxlen=1000)
-        self.prediction_accuracy_history = deque(maxlen=1000)
-        self.counter_attack_success_history = deque(maxlen=1000)
-
-        # JEPA-specific metrics
-        self.jepa_metrics = {
-            "total_binary_predictions": 0,
-            "binary_prediction_accuracy": 0,
-            "response_planning_attempts": 0,
-            "successful_responses": 0,
-            "avg_prediction_confidence": 0.0,
-            "strategic_value_trend": 0.0,
-        }
+    def __init__(self, enable_vision_transformer=True, verbose=0):
+        super(VisionPipelineCallback, self).__init__(verbose)
+        self.enable_vision_transformer = enable_vision_transformer
+        self.last_log_time = time.time()
+        self.log_interval = 60  # Log every 60 seconds
 
     def _on_step(self) -> bool:
-        # Enhanced logging every 10000 steps for JEPA analysis
-        if (
-            self.num_timesteps % 10000 == 0
-            and self.num_timesteps != self.last_stats_log
-        ):
-            self.last_stats_log = self.num_timesteps
-
-            print(f"\n📊 JEPA + PRIME TRAINING - Step {self.num_timesteps:,}")
-
-            # Memory monitoring
-            if torch.cuda.is_available():
-                current_vram = torch.cuda.memory_allocated() / (1024**3)
-                max_vram = torch.cuda.max_memory_allocated() / (1024**3)
-                free_vram = torch.cuda.mem_get_info()[0] / (1024**3)
-                total_vram = torch.cuda.mem_get_info()[1] / (1024**3)
-
-                print(f"   💾 VRAM: {current_vram:.1f}GB / {max_vram:.1f}GB peak")
-                print(f"   💾 Free: {free_vram:.1f}GB / {total_vram:.1f}GB total")
-
-            # Get enhanced training stats
-            if hasattr(self.training_env, "get_attr"):
-                try:
-                    # Get environment wrapper attributes directly
-                    envs = self.training_env.get_attr("current_stats")
-                    env_stats = envs[0] if envs and len(envs) > 0 else {}
-
-                    # Get strategic stats
-                    strategic_envs = self.training_env.get_attr("strategic_stats")
-                    strategic_stats = (
-                        strategic_envs[0]
-                        if strategic_envs and len(strategic_envs) > 0
-                        else {}
-                    )
-
-                    # Basic performance
-                    win_rate = env_stats.get("win_rate", 0) * 100 if env_stats else 0
-                    wins = env_stats.get("wins", 0) if env_stats else 0
-                    losses = env_stats.get("losses", 0) if env_stats else 0
-                    total_rounds = env_stats.get("total_rounds", 0) if env_stats else 0
-
-                    print(f"   🎯 Win Rate: {win_rate:.1f}% ({wins}W/{losses}L)")
-                    print(f"   🎮 Total Rounds: {total_rounds}")
-
-                    # JEPA-specific stats (updated for binary predictions)
-                    if self.enable_jepa and strategic_stats:
-                        binary_predictions = strategic_stats.get(
-                            "binary_predictions_made", 0
-                        )
-                        attack_accuracy = (
-                            strategic_stats.get("attack_prediction_accuracy", 0) * 100
-                        )
-                        damage_accuracy = (
-                            strategic_stats.get("damage_prediction_accuracy", 0) * 100
-                        )
-                        overall_accuracy = (
-                            strategic_stats.get("overall_prediction_accuracy", 0) * 100
-                        )
-                        successful_responses = strategic_stats.get(
-                            "successful_responses", 0
-                        )
-                        total_responses = strategic_stats.get("total_responses", 0)
-
-                        print(f"   🔮 Binary predictions: {binary_predictions}")
-                        print(f"   🎯 Attack accuracy: {attack_accuracy:.1f}%")
-                        print(f"   💥 Damage accuracy: {damage_accuracy:.1f}%")
-                        print(f"   📊 Overall accuracy: {overall_accuracy:.1f}%")
-                        print(
-                            f"   ⚔️ Response success: {successful_responses}/{total_responses}"
-                        )
-
-                        # Update JEPA metrics
-                        self.jepa_metrics["total_binary_predictions"] = (
-                            binary_predictions
-                        )
-                        if overall_accuracy > 0:
-                            self.jepa_metrics["binary_prediction_accuracy"] = (
-                                overall_accuracy / 100
-                            )
-                        self.jepa_metrics["response_planning_attempts"] = (
-                            total_responses
-                        )
-                        self.jepa_metrics["successful_responses"] = successful_responses
-
-                    # Model parameters
-                    print(f"   🎛️ Entropy coefficient: {self.model.ent_coef:.4f}")
-                    print(f"   📏 N_steps: {self.model.n_steps}")
-
-                    if self.enable_jepa:
-                        print(f"   🧠 JEPA + PRIME + Enhanced CNN")
-                        print(f"   🎮 Strategic AI with 6-frame binary prediction")
-                    else:
-                        print(f"   🧠 PRIME + Enhanced CNN")
-
-                except Exception as e:
-                    # Simplified fallback stats
-                    print(f"   🎯 Win Rate: Learning... (early training)")
-                    print(f"   🏆 Record: Rounds in progress")
-                    print(f"   🎛️ Entropy coefficient: {self.model.ent_coef:.4f}")
-                    print(f"   📏 N_steps: {self.model.n_steps}")
-                    if self.enable_jepa:
-                        print(f"   🧠 JEPA + PRIME + Enhanced CNN")
-                        print(f"   🔮 6-frame binary strategic prediction")
-                    else:
-                        print(f"   🧠 PRIME + Enhanced CNN")
-                        print(
-                            f"   📝 Note: Win rate tracking starts after first completed rounds"
-                        )
-
-            # Learning rate and entropy adaptation suggestions
-            if self.num_timesteps > 50000:
-                if (
-                    self.enable_jepa
-                    and self.jepa_metrics["total_binary_predictions"] > 100
-                ):
-                    binary_accuracy = self.jepa_metrics["binary_prediction_accuracy"]
-                    if binary_accuracy < 0.55:
-                        print(
-                            f"   💡 Low binary prediction accuracy ({binary_accuracy:.2f}) - consider increasing entropy"
-                        )
-                    elif binary_accuracy > 0.75:
-                        print(
-                            f"   🎯 High binary prediction accuracy ({binary_accuracy:.2f}) - excellent opponent modeling!"
-                        )
-
+        current_time = time.time()
+        if current_time - self.last_log_time > self.log_interval:
+            self.last_log_time = current_time
+            self._log_training_stats()
         return True
 
-    def _on_training_end(self) -> None:
-        """Print final JEPA + PRIME analysis"""
-        print(f"\n🎉 JEPA + PRIME TRAINING COMPLETED!")
+    def _log_training_stats(self):
+        """Log comprehensive training statistics"""
+        try:
+            print(
+                f"\n--- 📊 Vision Pipeline Training @ Step {self.num_timesteps:,} ---"
+            )
 
-        if self.enable_jepa:
-            print(f"\n📊 FINAL JEPA BINARY PREDICTION METRICS:")
-            for key, value in self.jepa_metrics.items():
-                if isinstance(value, float):
-                    print(f"   {key}: {value:.3f}")
+            # Get environment statistics
+            all_stats = self.training_env.get_attr("stats")
+            if all_stats and len(all_stats) > 0:
+                stats = all_stats[0]
+
+                # OpenCV detection statistics
+                fire_knives = stats.get("fire_knives_detected", 0)
+                bombs = stats.get("bombs_detected", 0)
+                print(f"   🔍 OpenCV Detections (Total):")
+                print(f"      🔥 Fire Knives: {fire_knives:,}")
+                print(f"      💣 Bombs: {bombs:,}")
+
+                # Vision transformer statistics
+                if self.enable_vision_transformer:
+                    vt_ready = stats.get("vision_transformer_ready", False)
+                    predictions = stats.get("predictions_made", 0)
+
+                    if vt_ready:
+                        print(
+                            f"   🧠 Vision Transformer: Ready ({predictions:,} predictions made)"
+                        )
+                    else:
+                        print("   🧠 Vision Transformer: Initializing...")
                 else:
-                    print(f"   {key}: {value}")
+                    print("   🧠 Vision Transformer: Disabled (OpenCV + CNN only)")
 
-            print(f"\n🏆 STRATEGIC AI ACHIEVEMENTS:")
-            if self.jepa_metrics["total_binary_predictions"] > 0:
-                binary_accuracy = self.jepa_metrics["binary_prediction_accuracy"]
-                print(f"   🎯 Binary prediction mastery: {binary_accuracy:.1%}")
+                # Detection rate analysis
+                total_frames = self.num_timesteps
+                if total_frames > 0:
+                    fire_rate = fire_knives / total_frames * 1000
+                    bomb_rate = bombs / total_frames * 1000
+                    print(f"   📈 Detection Rates:")
+                    print(f"      Fire knives: {fire_rate:.2f} per 1000 frames")
+                    print(f"      Bombs: {bomb_rate:.2f} per 1000 frames")
 
-                if binary_accuracy > 0.75:
-                    print(
-                        f"   ⭐ EXCELLENT: High-level binary outcome modeling achieved!"
-                    )
-                elif binary_accuracy > 0.6:
-                    print(f"   ✅ GOOD: Solid binary pattern recognition developed")
-                else:
-                    print(f"   📈 DEVELOPING: Binary understanding improving")
+            # System and training statistics
+            self._log_system_stats()
 
-            if self.jepa_metrics["response_planning_attempts"] > 0:
-                success_rate = (
-                    self.jepa_metrics["successful_responses"]
-                    / self.jepa_metrics["response_planning_attempts"]
-                )
+            print("--------------------------------------------------")
+
+        except Exception as e:
+            print(f"   ⚠️ Logging error: {e}")
+
+    def _log_system_stats(self):
+        """Log system and training parameters"""
+        try:
+            # Memory usage
+            if torch.cuda.is_available():
+                vram_alloc = torch.cuda.memory_allocated() / (1024**3)
+                vram_cached = torch.cuda.memory_reserved() / (1024**3)
                 print(
-                    f"   ⚔️ Strategic response capability: {success_rate:.1%} success rate"
-                )
-                print(
-                    f"   🎯 Total responses planned: {self.jepa_metrics['response_planning_attempts']}"
+                    f"   💾 VRAM: {vram_alloc:.2f}GB allocated / {vram_cached:.2f}GB cached"
                 )
 
+            # Learning rate
+            if hasattr(self.model, "learning_rate"):
+                lr = self.model.learning_rate
+                if callable(lr):
+                    lr = lr(self.model._current_progress_remaining)
+                print(f"   📈 Learning Rate: {lr:.2e}")
 
-def calculate_jepa_batch_size(obs_shape, target_vram_gb=11.6, enable_jepa=True):
-    """
-    Calculate optimal batch size considering JEPA overhead
-    """
-    num_frames, height, width = obs_shape
-    obs_size_bytes = num_frames * height * width * 4
-    obs_size_mb = obs_size_bytes / (1024 * 1024)
+            # Architecture info
+            arch_info = "OpenCV + CNN"
+            if self.enable_vision_transformer:
+                arch_info += " + Vision Transformer"
+            print(f"   🏗️ Architecture: {arch_info}")
 
-    print(f"📊 JEPA + PRIME BATCH CALCULATION:")
-    print(f"   GPU: {target_vram_gb:.1f} GB")
-    print(f"   Obs per sample: {obs_size_mb:.2f} MB")
-    print(f"   JEPA enabled: {enable_jepa}")
-
-    # Base CNN memory overhead
-    base_model_overhead = 0.4  # Enhanced CNN
-
-    # JEPA adds additional overhead
-    jepa_overhead = 0.6 if enable_jepa else 0.0  # JEPA predictor + counter-planner
-
-    total_model_overhead = base_model_overhead + jepa_overhead
-    activation_multiplier = 2.0 if enable_jepa else 1.5  # Higher for JEPA processing
-
-    # Calculate memory usage
-    memory_per_sample = obs_size_bytes / (1024**3)
-    total_overhead = total_model_overhead + 1.2  # Safety buffer
-
-    # Available memory for batch
-    available_for_batch = target_vram_gb - total_overhead
-    max_batch_size = int(
-        available_for_batch / (memory_per_sample * activation_multiplier)
-    )
-
-    # JEPA works well with medium-large batches
-    if enable_jepa:
-        target_batches = [512, 768, 1024, 1536, 2048]
-    else:
-        target_batches = [1024, 1536, 2048, 3072, 4096]
-
-    final_batch = max([b for b in target_batches if b <= max_batch_size], default=512)
-
-    estimated_usage = (
-        total_overhead + final_batch * memory_per_sample * activation_multiplier
-    )
-
-    print(f"   🎯 Optimal batch size: {final_batch:,}")
-    print(f"   📊 Estimated VRAM: {estimated_usage:.1f} GB")
-    if enable_jepa:
-        print(f"   🧠 JEPA overhead: {jepa_overhead:.1f} GB")
-        print(f"   ⚔️ Strategic AI ready!")
-
-    return final_batch
+        except Exception as e:
+            print(f"   ⚠️ System stats error: {e}")
 
 
-def create_jepa_prime_model(
-    env, device, args, feature_extractor_class, features_dim, net_arch, enable_jepa=True
-):
-    """
-    Create JEPA + PRIME enhanced model
-    """
+def make_env(game, state_path, render_mode, frame_stack, enable_vision_transformer):
+    """Environment factory function"""
 
-    # Initialize JEPA + PRIME model
-    jepa_prime_model = JEPAPRIMEModel(
-        feature_extractor_class=feature_extractor_class,
-        feature_extractor_kwargs={"features_dim": features_dim},
-        action_space_size=env.action_space.n,
-        enable_jepa=enable_jepa,
-        prediction_horizon=args.frame_stack,  # Use frame_stack as prediction horizon
-    ).to(device)
+    def _init():
+        try:
+            # Create base retro environment
+            env = retro.make(
+                game=game,
+                state=state_path,
+                use_restricted_actions=retro.Actions.FILTERED,
+                obs_type=retro.Observations.IMAGE,
+                render_mode=render_mode,
+            )
 
-    # Learning rate schedule adapted for JEPA
-    if enable_jepa:
-        # More conservative schedule for JEPA stability
-        lr_schedule = lambda progress: args.learning_rate * (1 - 0.6 * progress)
-    else:
-        lr_schedule = lambda progress: args.learning_rate * (1 - 0.8 * progress)
+            # Wrap with vision pipeline (180×128 resolution)
+            env = VisionPipelineWrapper(
+                env,
+                frame_stack=frame_stack,
+                enable_vision_transformer=enable_vision_transformer,
+            )
 
-    # Optimized for JEPA + PRIME + Large batch
-    model = PPO(
-        "CnnPolicy",
-        env,
-        device=device,
-        verbose=1,
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=3 if enable_jepa else 2,  # More epochs for JEPA learning
-        gamma=0.99,
-        learning_rate=lr_schedule,
-        clip_range=0.2,
-        ent_coef=args.ent_coef,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        gae_lambda=0.95,
-        tensorboard_log=None,
-        policy_kwargs=dict(
-            features_extractor_class=feature_extractor_class,
-            features_extractor_kwargs=dict(features_dim=features_dim),
-            normalize_images=False,
-            optimizer_class=torch.optim.AdamW,
-            optimizer_kwargs=dict(eps=1e-5, weight_decay=1e-4),
-            net_arch=net_arch,
-            activation_fn=nn.ReLU,
-        ),
-    )
+            # Monitor wrapper for episode statistics
+            env = Monitor(env)
 
-    architecture_name = "JEPA + PRIME" if enable_jepa else "PRIME"
-    print(f"🧠 {architecture_name} Model Created:")
-    print(f"   📊 Batch size: {args.batch_size:,}")
-    print(f"   📏 N_steps: {args.n_steps:,}")
-    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
-    print(f"   🎓 Epochs: {3 if enable_jepa else 2}")
-    if enable_jepa:
-        print(f"   🔮 Binary outcome prediction: Enabled")
-        print(f"   ⚔️ Counter-attack planning: Enabled")
-        print(f"   🎯 Strategic value estimation: Enhanced")
-        print(f"   📈 Prediction horizon: {args.frame_stack} frames")
-    print(f"   💾 Memory optimized for 11.6GB GPU")
+            return env
 
-    return model, jepa_prime_model
+        except Exception as e:
+            print(f"❌ Environment creation failed: {e}")
+            raise
+
+    return _init
 
 
-def main():
+def parse_arguments():
+    """Parse and validate command line arguments"""
     parser = argparse.ArgumentParser(
-        description="JEPA + PRIME Enhanced Fighting Game AI Training"
+        description="Vision Pipeline Fighting Game AI Training (180×128 optimized)"
     )
-    parser.add_argument("--total-timesteps", type=int, default=15000000)
+
+    # Training hyperparameters
     parser.add_argument(
-        "--learning-rate", type=float, default=2.0e-4
-    )  # Slightly lower for JEPA stability
+        "--total-timesteps",
+        type=int,
+        default=10_000_000,
+        help="Total training timesteps (default: 10M)",
+    )
+    parser.add_argument(
+        "--n-steps",
+        type=int,
+        default=4096,
+        help="Steps per environment per update (default: 4096)",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=512, help="Minibatch size (default: 512)"
+    )
+    parser.add_argument(
+        "--lr", type=float, default=2.5e-4, help="Learning rate (default: 2.5e-4)"
+    )
     parser.add_argument(
         "--ent-coef",
         type=float,
-        default=0.1,
-        help="Entropy coefficient (higher for JEPA exploration)",
+        default=0.01,
+        help="Entropy coefficient for exploration (default: 0.01)",
     )
-    parser.add_argument("--resume", type=str, default=None)
-    parser.add_argument("--render", action="store_true")
-    parser.add_argument("--use-default-state", action="store_true")
-    parser.add_argument("--target-vram", type=float, default=11.6)
-    parser.add_argument(
-        "--n-steps", type=int, default=2048, help="Number of steps per rollout"
-    )
-    parser.add_argument("--batch-size", type=int, default=1024, help="Batch size")
+
+    # Model configuration
     parser.add_argument(
         "--frame-stack",
         type=int,
-        default=6,
-        help="Number of frames to stack (default: 6, also sets prediction horizon)",
+        default=8,
+        help="Number of frames to stack (default: 8)",
     )
     parser.add_argument(
-        "--enable-jepa",
+        "--no-vision-transformer",
         action="store_true",
-        help="Enable JEPA opponent prediction (default: True)",
+        help="Disable Vision Transformer (use OpenCV + CNN only)",
     )
     parser.add_argument(
-        "--disable-jepa", action="store_true", help="Disable JEPA (PRIME only)"
+        "--features-dim",
+        type=int,
+        default=512,
+        help="CNN feature dimensions (default: 512)",
+    )
+
+    # Training utilities
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to model checkpoint to resume training",
+    )
+    parser.add_argument(
+        "--render", action="store_true", help="Render the environment during training"
+    )
+    parser.add_argument(
+        "--save-freq",
+        type=int,
+        default=100_000,
+        help="Save model every N steps (default: 100k)",
+    )
+
+    # Game configuration
+    parser.add_argument(
+        "--game",
+        type=str,
+        default="SamuraiShodown-Genesis",
+        help="Retro game to use (default: SamuraiShodown-Genesis)",
+    )
+    parser.add_argument(
+        "--state",
+        type=str,
+        default="samurai.state",
+        help="Game state file (default: samurai.state)",
     )
 
     args = parser.parse_args()
 
-    # JEPA is enabled by default, unless explicitly disabled
-    if not args.disable_jepa:
-        args.enable_jepa = True
-    else:
-        args.enable_jepa = False
+    # Validation
+    if args.total_timesteps <= 0:
+        raise ValueError("total-timesteps must be positive")
+    if args.frame_stack < 1:
+        raise ValueError("frame-stack must be at least 1")
+    if args.lr <= 0:
+        raise ValueError("learning rate must be positive")
+    if args.features_dim < 64:
+        raise ValueError("features-dim must be at least 64")
 
-    # Memory optimization
-    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # Set derived arguments
+    args.enable_vision_transformer = not args.no_vision_transformer
 
-    if device == "cuda":
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+    return args
 
-    mode_name = "JEPA + PRIME" if args.enable_jepa else "PRIME ONLY"
-    print(f"🚀 {mode_name} ENHANCED FIGHTING GAME AI")
-    print(f"   💻 Device: {device}")
-    print(f"   🧠 Architecture: Enhanced CNN + {mode_name}")
-    print(f"   📊 Batch size: {args.batch_size:,}")
-    print(f"   📏 N_steps: {args.n_steps:,}")
-    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
-    print(f"   🖼️ Frame stack: {args.frame_stack}")
-    if args.enable_jepa:
-        print(
-            f"   🔮 Prediction horizon: {args.frame_stack} (auto-matched to frame stack)"
-        )
-        print(f"   ⚔️ Strategic opponent modeling: Enabled")
-        print(f"   🎯 Binary outcome prediction: 4 types (60-80% accuracy)")
-    print(f"   💾 GPU memory optimized for {args.target_vram}GB")
 
-    game = "SamuraiShodown-Genesis"
+def setup_model(env, args, device, save_dir):
+    """Setup PPO model with optimized vision pipeline configuration"""
 
-    # Handle state file
-    if args.use_default_state:
-        state = None
-    else:
-        if os.path.exists("samurai.state"):
-            state = os.path.abspath("samurai.state")
-            print(f"🎮 Using samurai.state file: {state}")
-        else:
-            print(f"❌ samurai.state not found, using default state")
-            state = None
-
-    # Observation shape for 6-frame setup
-    obs_shape = (18, 180, 126)  # 6 frames * 3 channels = 18
-    print(f"📊 Observation shape: {obs_shape} (6-frame stack)")
-
-    # Calculate optimal batch size considering JEPA overhead
-    optimal_batch_size = calculate_jepa_batch_size(
-        obs_shape, args.target_vram, args.enable_jepa
+    # Policy configuration optimized for vision pipeline
+    policy_kwargs = dict(
+        features_extractor_class=JEPAEnhancedCNN,
+        features_extractor_kwargs=dict(features_dim=args.features_dim),
+        net_arch=dict(
+            pi=[256, 128],  # Policy network architecture
+            vf=[256, 128],  # Value network architecture
+        ),
+        activation_fn=nn.ReLU,
+        optimizer_class=torch.optim.AdamW,
+        optimizer_kwargs=dict(eps=1e-5, weight_decay=1e-4),  # L2 regularization
     )
 
-    if args.batch_size > optimal_batch_size:
-        print(f"💡 Recommended batch size: {optimal_batch_size:,}")
-        print(f"   Current target: {args.batch_size:,}")
-        response = input(f"   Use recommended {optimal_batch_size:,}? (y/n): ")
-        if response.lower() == "y":
-            args.batch_size = optimal_batch_size
+    # Resume training if checkpoint exists
+    if args.resume and os.path.exists(args.resume):
+        print(f"📂 Resuming training from {args.resume}")
+        try:
+            model = PPO.load(
+                args.resume,
+                env=env,
+                device=device,
+                custom_objects={"learning_rate": args.lr},
+            )
+            print("   ✅ Model loaded successfully")
 
-    # Ensure buffer compatibility
-    if args.n_steps % args.batch_size != 0:
-        new_n_steps = ((args.n_steps // args.batch_size) + 1) * args.batch_size
-        print(
-            f"📊 Adjusting n_steps from {args.n_steps} to {new_n_steps} for compatibility"
-        )
-        args.n_steps = new_n_steps
+        except Exception as e:
+            print(f"   ❌ Failed to load model: {e}")
+            print("   🚀 Creating new model instead...")
+            model = create_new_model(env, args, policy_kwargs, save_dir, device)
+    else:
+        print("🚀 Creating new model...")
+        model = create_new_model(env, args, policy_kwargs, save_dir, device)
 
-    print(f"🔮 FINAL PARAMETERS:")
-    print(f"   🎮 Environment: JEPA-Enhanced Samurai Showdown")
-    print(f"   💪 Batch size: {args.batch_size:,}")
-    print(f"   📏 N_steps: {args.n_steps:,}")
-    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
-    print(f"   🌈 Channels: 18 (6-frame optimized)")
-    print(f"   🧠 Architecture: {mode_name} + Enhanced CNN")
-    print(f"   💾 Buffer/Batch ratio: {args.n_steps/args.batch_size:.1f}")
+    return model
 
-    # Create JEPA-enhanced environment
-    print(f"🔧 Creating {mode_name} environment...")
+
+def create_new_model(env, args, policy_kwargs, save_dir, device):
+    """Create new PPO model with optimized hyperparameters"""
+    return PPO(
+        "CnnPolicy",
+        env,
+        policy_kwargs=policy_kwargs,
+        # Training hyperparameters
+        n_steps=args.n_steps,
+        batch_size=args.batch_size,
+        n_epochs=4,
+        gamma=0.99,  # Discount factor
+        gae_lambda=0.95,  # GAE lambda
+        clip_range=0.2,  # PPO clip range
+        clip_range_vf=None,  # Value function clip range
+        ent_coef=args.ent_coef,  # Entropy coefficient
+        vf_coef=0.5,  # Value function coefficient
+        max_grad_norm=0.5,  # Gradient clipping
+        learning_rate=args.lr,
+        verbose=1,
+        tensorboard_log=f"./{save_dir}_logs/",
+        device=device,
+    )
+
+
+def inject_vision_components(env, model, enable_vision_transformer):
+    """Inject CNN feature extractor into vision pipeline wrapper"""
     try:
-        env = retro.make(
-            game=game,
-            state=state,
-            use_restricted_actions=retro.Actions.FILTERED,
-            obs_type=retro.Observations.IMAGE,
-            render_mode="human" if args.render else None,
-        )
+        print("   💉 Injecting CNN feature extractor into Vision Pipeline...")
 
-        env = SamuraiJEPAWrapper(
-            env,
-            reset_round=True,
-            rendering=args.render,
-            max_episode_steps=15000,
-            frame_stack=args.frame_stack,  # Use frame_stack argument
-            enable_jepa=args.enable_jepa,
-        )
+        # Navigate environment hierarchy
+        # DummyVecEnv -> Monitor -> VisionPipelineWrapper
+        monitor_env = env.envs[0]
+        wrapper_env = monitor_env.env
 
-        env = Monitor(env)
-        print(f"✅ {mode_name} environment created successfully")
+        if hasattr(wrapper_env, "inject_feature_extractor"):
+            wrapper_env.inject_feature_extractor(model.policy.features_extractor)
+
+            if enable_vision_transformer:
+                print(
+                    "   ✅ Complete Vision Pipeline (OpenCV + CNN + Transformer) initialized!"
+                )
+            else:
+                print("   ✅ Partial Vision Pipeline (OpenCV + CNN) initialized!")
+        else:
+            print(f"   ⚠️ Warning: Could not find inject_feature_extractor method")
+            print(f"   Environment type: {type(wrapper_env)}")
+            available_methods = [
+                attr
+                for attr in dir(wrapper_env)
+                if not attr.startswith("_") and callable(getattr(wrapper_env, attr))
+            ]
+            print(f"   Available methods: {available_methods[:5]}...")
 
     except Exception as e:
-        print(f"❌ Failed to create environment: {e}")
-        return
+        print(f"   ❌ Vision Pipeline injection failed: {e}")
+        print("   Training will continue with base CNN only")
 
-    # Create save directory
-    save_dir = (
-        "trained_models_jepa_prime" if args.enable_jepa else "trained_models_prime_only"
-    )
-    os.makedirs(save_dir, exist_ok=True)
 
-    # Monitor initial VRAM
-    if device == "cuda":
-        torch.cuda.empty_cache()
-        vram_before = torch.cuda.memory_allocated() / (1024**3)
-        print(f"   VRAM before model: {vram_before:.2f} GB")
+def validate_setup(env, args):
+    """Validate that the vision pipeline is properly configured"""
+    try:
+        print("   🔍 Validating vision pipeline setup...")
 
-    # Enhanced CNN configuration for JEPA
-    feature_extractor_class = JEPAEnhancedCNN
-    features_dim = 512
-    net_arch = dict(
-        pi=[512, 256],
-        vf=[512, 256],
-    )
+        monitor_env = env.envs[0]
+        wrapper_env = monitor_env.env
 
-    print(f"🧠 Using {mode_name} Enhanced CNN:")
-    print(f"   🎯 Features: {features_dim}")
-    print(f"   🏗️ Architecture: {net_arch}")
-    if args.enable_jepa:
-        print(f"   🔮 JEPA-enhanced temporal processing: Enabled")
-        print(f"   ⚔️ Strategic feature extraction: Optimized")
-    print(f"   🚀 Memory efficient for large batches")
+        # Check wrapper type
+        if not hasattr(wrapper_env, "opencv_detector"):
+            print("   ⚠️ Warning: OpenCV detector not found")
+            return False
 
-    # Create model
-    if args.resume and os.path.exists(args.resume):
-        print(f"📂 Loading model: {args.resume}")
-        model = PPO.load(args.resume, env=env, device=device)
-        jepa_prime_model = None
+        # Check OpenCV detector configuration
+        detector = wrapper_env.opencv_detector
+        print(f"   ✅ OpenCV detector configured:")
+        print(
+            f"      🔥 Fire knife area: {detector.fire_knife_min_area}-{detector.fire_knife_max_area}px²"
+        )
+        print(
+            f"      💣 Bomb area: {detector.bomb_min_area}-{detector.bomb_max_area}px²"
+        )
+        print(f"      📏 Floor threshold: y > {detector.floor_threshold}")
 
-        # Update parameters from arguments when resuming
-        model.ent_coef = args.ent_coef
-        print(f"🔄 Updated ent_coef to: {args.ent_coef:.4f}")
+        # Check observation space
+        obs_shape = wrapper_env.observation_space.shape
+        expected_shape = (3 * args.frame_stack, 128, 180)  # CHW format
+        if obs_shape != expected_shape:
+            print(
+                f"   ⚠️ Warning: Unexpected observation shape {obs_shape}, expected {expected_shape}"
+            )
+            return False
 
-    else:
-        print(f"🚀 Creating {mode_name} model")
-        model, jepa_prime_model = create_jepa_prime_model(
-            env,
-            device,
-            args,
-            feature_extractor_class,
-            features_dim,
-            net_arch,
-            args.enable_jepa,
+        print(f"   ✅ Observation space: {obs_shape} (CHW format)")
+        print(f"   ✅ Frame resolution: 180×128 (optimized)")
+
+        return True
+
+    except Exception as e:
+        print(f"   ⚠️ Setup validation failed: {e}")
+        return False
+
+
+def main():
+    """Main training function"""
+    try:
+        # Parse arguments and setup
+        args = parse_arguments()
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+        # Print configuration
+        mode_name = (
+            "Complete Vision Pipeline"
+            if args.enable_vision_transformer
+            else "OpenCV + CNN"
+        )
+        print(f"🚀 Starting {mode_name} Training")
+        print(f"   💻 Device: {device.upper()}")
+        print(f"   🎯 Total Timesteps: {args.total_timesteps:,}")
+        print(f"   📚 Frame Stack: {args.frame_stack}")
+        print(f"   📏 Resolution: 180×128 (optimized)")
+        print(f"   🔍 OpenCV Detection: ENABLED (fire knives + bombs)")
+        print(
+            f"   🧠 Vision Transformer: {'ENABLED' if args.enable_vision_transformer else 'DISABLED'}"
+        )
+        print(f"   🎮 Game: {args.game}")
+
+        # Setup game state
+        state_path = (
+            os.path.abspath(args.state)
+            if os.path.exists(args.state)
+            else retro.State.DEFAULT
+        )
+        if state_path == retro.State.DEFAULT:
+            print(f"   💾 State: DEFAULT (no custom state file found)")
+        else:
+            print(f"   💾 State: {state_path}")
+
+        # Create environment
+        render_mode = "human" if args.render else None
+        env = DummyVecEnv(
+            [
+                make_env(
+                    args.game,
+                    state_path,
+                    render_mode,
+                    args.frame_stack,
+                    args.enable_vision_transformer,
+                )
+            ]
         )
 
-    # Monitor VRAM after model creation
-    if device == "cuda":
-        vram_after = torch.cuda.memory_allocated() / (1024**3)
-        model_vram = vram_after - vram_before
-        print(f"   VRAM after model: {vram_after:.2f} GB")
-        print(f"   Model VRAM: {model_vram:.2f} GB")
-        if args.enable_jepa:
-            print(f"   🧠 JEPA overhead included: Strategic AI ready!")
-        else:
-            print(f"   🧠 PRIME-only model: Memory efficient!")
+        # Validate setup
+        setup_ok = validate_setup(env, args)
+        if not setup_ok:
+            print("   ⚠️ Warning: Setup validation failed, but continuing...")
 
-    # Callbacks
-    checkpoint_callback = CheckpointCallback(
-        save_freq=50000,
-        save_path=save_dir,
-        name_prefix=f"ppo_{'jepa_prime' if args.enable_jepa else 'prime_only'}",
-    )
+        # Setup save directories
+        save_dir = "trained_models_vision_pipeline"
+        os.makedirs(save_dir, exist_ok=True)
+        os.makedirs(f"{save_dir}_logs", exist_ok=True)
+        print(f"   💾 Save directory: {save_dir}")
 
-    training_callback = JEPAPRIMETrainingCallback(
-        jepa_prime_model=jepa_prime_model, enable_jepa=args.enable_jepa, verbose=1
-    )
+        # Setup model
+        model = setup_model(env, args, device, save_dir)
 
-    # Training
-    start_time = time.time()
-    print(f"🏋️ Starting {mode_name} Training")
-    print(f"   🚀 Batch size: {args.batch_size:,}")
-    print(f"   📏 N_steps: {args.n_steps:,}")
-    print(f"   🎲 Entropy coefficient: {args.ent_coef:.4f}")
-    if args.enable_jepa:
-        print(f"   🔮 Binary outcome prediction: Learning patterns")
-        print(f"   ⚔️ Counter-attack planning: Strategic AI")
-        print(f"   🎯 Advanced reward system: JEPA + PRIME")
-    else:
-        print(f"   🧠 Process reward modeling: PRIME methodology")
-    print(f"   💾 Memory optimized training")
+        # Inject vision components
+        inject_vision_components(env, model, args.enable_vision_transformer)
 
-    try:
+        # Setup training callbacks
+        checkpoint_callback = CheckpointCallback(
+            save_freq=max(args.save_freq, args.n_steps),
+            save_path=save_dir,
+            name_prefix="ppo_vision_pipeline",
+        )
+
+        training_callback = VisionPipelineCallback(
+            enable_vision_transformer=args.enable_vision_transformer
+        )
+
+        # Start training
+        print(f"\n🎯 Starting training with {mode_name}...")
+        print("🔍 OpenCV Detection Targets:")
+        print("   🔥 Big Fire Knives: 150-4000px² (12×12 to 63×63 pixels)")
+        print("   💣 Small Bombs: 25-350px² (5×5 to 19×19 pixels)")
+
+        if args.enable_vision_transformer:
+            print("🧠 Vision Transformer Learning:")
+            print("   📈 Visual patterns → Health/Score momentum associations")
+            print("   🎯 Predictive action recommendations")
+
+        # Execute training
         model.learn(
             total_timesteps=args.total_timesteps,
             callback=[checkpoint_callback, training_callback],
             reset_num_timesteps=not bool(args.resume),
         )
 
-        training_time = time.time() - start_time
-        print(f"🎉 {mode_name} training completed in {training_time/3600:.1f} hours!")
+        print("\n🎉 Training completed successfully!")
 
-        # Final performance assessment
-        if hasattr(env, "current_stats"):
-            final_stats = env.current_stats
-            print(f"\n🎯 FINAL {mode_name} PERFORMANCE:")
-            print(f"   🏆 Win Rate: {final_stats['win_rate']*100:.1f}%")
-            print(f"   🎮 Total Rounds: {final_stats['total_rounds']}")
-            print(f"   📊 Win/Loss: {final_stats['wins']}W/{final_stats['losses']}L")
-            print(f"   🎲 Final entropy coefficient: {model.ent_coef:.4f}")
-
-        if args.enable_jepa and hasattr(env, "strategic_stats"):
-            strategic_stats = env.strategic_stats
-            print(f"\n🧠 JEPA STRATEGIC ANALYSIS:")
-            print(
-                f"   🔮 Binary predictions made: {strategic_stats.get('binary_predictions_made', 0)}"
-            )
-            print(
-                f"   🎯 Attack prediction accuracy: {strategic_stats.get('attack_prediction_accuracy', 0)*100:.1f}%"
-            )
-            print(
-                f"   💥 Damage prediction accuracy: {strategic_stats.get('damage_prediction_accuracy', 0)*100:.1f}%"
-            )
-            print(
-                f"   📊 Overall prediction accuracy: {strategic_stats.get('overall_prediction_accuracy', 0)*100:.1f}%"
-            )
-            print(
-                f"   ⚔️ Strategic responses: {strategic_stats.get('successful_responses', 0)}/{strategic_stats.get('total_responses', 0)}"
-            )
-
+    except KeyboardInterrupt:
+        print("\n⏸️ Training interrupted by user")
     except Exception as e:
-        print(f"❌ {mode_name} training failed: {e}")
+        print(f"\n❌ Training failed: {e}")
         import traceback
 
-        traceback.print_exc()
+        print(f"Full traceback: {traceback.format_exc()}")
+        raise
     finally:
-        env.close()
-        if device == "cuda":
-            torch.cuda.empty_cache()
+        # Cleanup resources
+        try:
+            if "env" in locals():
+                env.close()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            print("   🧹 Cleanup completed")
+        except Exception as e:
+            print(f"⚠️ Cleanup warning: {e}")
 
     # Save final model
-    final_path = os.path.join(
-        save_dir, f"ppo_{'jepa_prime' if args.enable_jepa else 'prime_only'}_final.zip"
-    )
-    model.save(final_path)
-    print(f"💾 Model saved: {final_path}")
-
-    # Save JEPA + PRIME model if available
-    if jepa_prime_model is not None:
-        model_path = os.path.join(
-            save_dir,
-            f"{'jepa_prime' if args.enable_jepa else 'prime_only'}_model_final.pth",
-        )
-        torch.save(jepa_prime_model.state_dict(), model_path)
-        print(f"💾 {mode_name} model saved: {model_path}")
-
-    print(f"✅ {mode_name} TRAINING COMPLETE!")
-
-    if args.enable_jepa:
-        print("🎯 JEPA + PRIME benefits:")
-        print("   • Binary outcome prediction: 4 simple yes/no predictions")
-        print("   • Strategic counter-attack planning: Optimal responses")
-        print("   • Enhanced temporal understanding: 6-frame + sequence modeling")
-        print("   • Process + outcome rewards: PRIME methodology")
-        print("   • Memory efficient: Optimized for 11.6GB GPU")
-        print("   • Self-supervised learning: Discovers opponent strategies")
-        print("   • Hierarchical planning: Short-term tactics + long-term strategy")
-        print("   • Confidence-weighted decisions: Reliable action selection")
-        print(
-            "   • Expected 60-80% accuracy: Much better than 12.5% movement classification"
-        )
-    else:
-        print("🎯 PRIME-only benefits:")
-        print("   • Process reward modeling: Dense reward signals")
-        print("   • Memory efficient: Maximum batch sizes")
-        print("   • Stable training: Proven PRIME methodology")
-        print("   • Fast convergence: Optimized for fighting games")
-
-    print(f"\n🎮 TRAINING EXAMPLES:")
-    print(f"   # High exploration with JEPA binary learning:")
-    print(f"   python train.py --enable-jepa --ent-coef 0.3 --frame-stack 6")
-    print(f"   ")
-    print(f"   # Balanced strategic training:")
-    print(f"   python train.py --enable-jepa --ent-coef 0.1 --n-steps 2048")
-    print(f"   ")
-    print(f"   # Fine-tuning with low exploration:")
-    print(f"   python train.py --enable-jepa --ent-coef 0.05 --batch-size 1536")
-    print(f"   ")
-    print(f"   # PRIME-only for maximum speed:")
-    print(f"   python train.py --disable-jepa --ent-coef 0.1 --batch-size 2048")
-    print(f"   ")
-    print(f"   # Resume with different JEPA settings:")
-    print(f"   python train.py --resume model.zip --enable-jepa --frame-stack 6")
-    print(f"   ")
-    print(f"   # Long training session:")
-    print(f"   python train.py --enable-jepa --total-timesteps 20000000 --n-steps 4096")
-    print(f"   ")
-    print(f"   🧠 Strategic AI: Binary outcome prediction + counter-attack planning")
-    print(f"   💾 Memory optimized: Perfect for 11.6GB GPU")
-    print(f"   🎯 Enhanced rewards: JEPA insights + PRIME methodology")
-    print(f"   ⚔️ Fighting game mastery: Temporal patterns + strategic responses")
-
-    print(f"\n🔧 ADVANCED USAGE:")
-    print(f"   # Curriculum learning - start with high entropy, gradually reduce:")
-    print(f"   # Phase 1: Exploration")
-    print(f"   python train.py --enable-jepa --ent-coef 0.5 --total-timesteps 5000000")
-    print(f"   # Phase 2: Refinement")
-    print(
-        f"   python train.py --resume model_checkpoint.zip --ent-coef 0.2 --total-timesteps 5000000"
-    )
-    print(f"   # Phase 3: Mastery")
-    print(
-        f"   python train.py --resume model_checkpoint.zip --ent-coef 0.05 --total-timesteps 5000000"
-    )
-    print(f"   ")
-    print(f"   # Memory-constrained training:")
-    print(
-        f"   python train.py --enable-jepa --batch-size 512 --n-steps 1024 --target-vram 8.0"
-    )
-
-    print(f"\n📊 MONITORING TIPS:")
-    print(f"   • Watch binary prediction accuracy - should reach 60%+ quickly")
-    print(f"   • Monitor counter-attack success rate - indicates strategic learning")
-    print(f"   • VRAM usage should remain stable throughout training")
-    print(f"   • Win rate improvement indicates overall AI effectiveness")
-    print(f"   • High entropy early → Low entropy later for best results")
-
-    print(f"\n🎯 JEPA BINARY PREDICTION ADVANTAGES EXPLAINED:")
-    print(f"   🔮 Self-supervised binary outcome modeling:")
-    print(f"      - Learns from observation without labeled opponent actions")
-    print(f"      - Discovers patterns in opponent behavior automatically")
-    print(f"      - Adapts to different fighting styles dynamically")
-    print(f"      - 4 simple yes/no questions vs 8-class movement classification")
-    print(f"   ")
-    print(f"   ⚔️ Strategic counter-attack planning:")
-    print(f"      - Predicts opponent's next 6 binary outcomes with confidence scores")
-    print(f"      - Plans optimal counter-sequences for maximum damage")
-    print(f"      - Considers timing windows and combo opportunities")
-    print(f"      - Simple binary decisions = faster, more reliable responses")
-    print(f"   ")
-    print(f"   🧠 Enhanced temporal understanding:")
-    print(f"      - 6-frame stacking captures immediate visual context")
-    print(f"      - LSTM sequence modeling learns longer binary patterns")
-    print(f"      - Hierarchical representations: frames → sequences → binary outcomes")
-    print(f"   ")
-    print(f"   🎯 Confidence-weighted decisions:")
-    print(f"      - High confidence binary predictions → aggressive counters")
-    print(f"      - Low confidence predictions → defensive/safe play")
-    print(f"      - Adaptive risk management based on prediction certainty")
-
-    print(f"\n🏆 EXPECTED PERFORMANCE GAINS:")
-    print(f"   📈 Binary prediction accuracy: 60-80% after sufficient training")
-    print(f"   ⚔️ Counter-attack success: 70-85% when prediction confidence > 0.7")
-    print(f"   🎮 Overall win rate: 15-25% improvement over baseline PRIME")
-    print(f"   ⏱️ Reaction time: Faster responses due to predictive planning")
-    print(
-        f"   🎯 Damage efficiency: Higher damage/action ratio through strategic timing"
-    )
-    print(f"   🧠 Learning speed: 2-3x faster convergence vs movement classification")
-
-    print(f"\n🔬 RESEARCH APPLICATIONS:")
-    print(f"   • Study of binary outcome modeling in competitive games")
-    print(f"   • Real-time strategy adaptation and learning")
-    print(f"   • Multi-step planning under uncertainty")
-    print(f"   • Self-supervised learning from temporal sequences")
-    print(f"   • Confidence estimation in predictive models")
-    print(f"   • Comparison of binary vs multi-class prediction in RL")
-
-    print(f"\n💡 TROUBLESHOOTING:")
-    print(
-        f"   • Low binary prediction accuracy: Increase entropy coefficient or sequence length"
-    )
-    print(f"   • High VRAM usage: Reduce batch size or disable JEPA temporarily")
-    print(
-        f"   • Poor counter-attack timing: Adjust prediction horizon or confidence thresholds"
-    )
-    print(f"   • Slow convergence: Balance exploration (entropy) with exploitation")
-    print(f"   • Training instability: Reduce learning rate or increase buffer size")
-    print(
-        f"   • Binary predictions stuck at 50%: Check reward signals and outcome extraction"
-    )
-
-    print(f"\n🎯 QUICK START GUIDE:")
-    print(f"   1. Basic training: python train.py --enable-jepa")
-    print(f"   2. Monitor logs for binary prediction accuracy")
-    print(f"   3. Expect 60%+ accuracy within first 1M timesteps")
-    print(f"   4. Strategic improvements visible in win rate")
-    print(f"   5. Fine-tune with lower entropy once accuracy is stable")
+    try:
+        if "model" in locals():
+            final_path = os.path.join(save_dir, "final_vision_pipeline_model.zip")
+            model.save(final_path)
+            print(f"💾 Final model saved to {final_path}")
+    except Exception as e:
+        print(f"⚠️ Failed to save final model: {e}")
 
 
 if __name__ == "__main__":
