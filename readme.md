@@ -5,9 +5,9 @@ python train.py \
     --lr 0.00025 \
     --ent-coef 0.01 \
     --frame-stack 8 \
-    --resume trained_models_jepa_attack_only/ppo_jepa_attack_only_7400000_steps.zip
+    --resume trained_models_jepa_anti_spam/ppo_jepa_anti_spam_750000_steps.zip --render
 
-    
+
 
 
 Input Observation: (batch, channels, height, width)

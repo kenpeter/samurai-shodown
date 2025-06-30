@@ -481,7 +481,10 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
             if hasattr(action, "__len__") and len(action) > 1:
                 # Convert multi-button array to a unique action identifier
                 # Method 1: Convert to tuple (hashable) for tracking
+
+                # convert muti array button to unique action identifier
                 action_tuple = tuple(int(x) for x in action)
+                # now unique action identifier (basically using hash, multi -> discrete)
                 action_hash = hash(action_tuple)
 
                 # Method 2: Also create a readable action signature for logging
@@ -1119,19 +1122,19 @@ class SamuraiJEPAWrapperImproved(gym.Wrapper):
                 + spam_penalty
             )
 
-            # Debug logging for significant events
-            if (
-                win_loss_reward != 0
-                or damage_dealt > 5
-                or damage_taken > 5
-                or defense_reward > 0
-                or spam_penalty < 0
-                or variety_reward > 0
-            ):
-                print(
-                    f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, "
-                    f"defense:{defense_reward:.1f}, variety:{variety_reward:.2f}, spam:{spam_penalty:.2f}, win_loss:{win_loss_reward:.1f})"
-                )
+            # # Debug logging for significant events
+            # if (
+            #     win_loss_reward != 0
+            #     or damage_dealt > 5
+            #     or damage_taken > 5
+            #     or defense_reward > 0
+            #     or spam_penalty < 0
+            #     or variety_reward > 0
+            # ):
+            #     print(
+            #         f"   💰 Reward: {total_reward:.3f} (dmg_dealt:{damage_dealt}, dmg_taken:{damage_taken}, "
+            #         f"defense:{defense_reward:.1f}, variety:{variety_reward:.2f}, spam:{spam_penalty:.2f}, win_loss:{win_loss_reward:.1f})"
+            #     )
 
             return float(total_reward)
 
