@@ -23,7 +23,7 @@ CRITICAL_HEALTH_THRESHOLD = MAX_HEALTH * 0.3
 
 
 class EnhancedOpenCVDetector:
-    """Enhanced OpenCV detector optimized for 180×128 resolution"""
+    """Enhanced OpenCV detector optimized for 180×128 resolution with temporal consistency"""
 
     def __init__(self):
         # OPTIMIZED: Color ranges for fire knife (big, orange/red projectile)
@@ -36,26 +36,33 @@ class EnhancedOpenCVDetector:
 
         # OPTIMIZED: Size constraints for 180×128 resolution
         self.fire_knife_min_area = 150  # ~12×12 pixels - big projectiles
-        self.fire_knife_max_area = 4000  # ~63×63 pixels - avoid player detection
+        self.fire_knife_max_area = (
+            12000  # ~110×110 pixels - handle large fire attacks/special moves
+        )
         self.bomb_min_area = 25  # ~5×5 pixels - small objects
         self.bomb_max_area = 350  # ~19×19 pixels - small bombs
 
         # Floor detection for 128px height
         self.floor_threshold = 128 * 0.6  # Bottom 40% of screen (y > 77)
 
-        # Motion tracking
+        # NEW: Temporal tracking for consistency
         self.prev_frame_gray = None
+        self.fire_knife_tracker = {}  # Track fire knives across frames
+        self.bomb_tracker = {}  # Track bombs across frames
+        self.frame_count = 0
+        self.min_tracking_frames = 3  # Object must appear for at least 3 frames
 
-        print(f"🔍 OpenCV detector optimized for 180×128:")
+        print(f"🔍 OpenCV detector with temporal consistency:")
         print(
-            f"   Fire knife: {self.fire_knife_min_area}-{self.fire_knife_max_area}px²"
+            f"   Fire knife: {self.fire_knife_min_area}-{self.fire_knife_max_area}px² (includes large fire attacks)"
         )
         print(f"   Bombs: {self.bomb_min_area}-{self.bomb_max_area}px²")
         print(f"   Floor zone: y > {self.floor_threshold}")
+        print(f"   Temporal tracking: {self.min_tracking_frames} frame minimum")
 
     def detect_threats(self, frame: np.ndarray) -> Dict:
         """
-        Main detection function optimized for 180×128 frames
+        Main detection function with temporal consistency filtering
         Input: frame [128, 180, 3] - RGB frame (H×W×C)
         Output: threat detection dictionary
         """
@@ -63,32 +70,46 @@ class EnhancedOpenCVDetector:
             return self._empty_detection()
 
         try:
+            self.frame_count += 1
+
             # Convert RGB to HSV for better color detection
             hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
             gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
 
-            # Detect fire knife (big projectile)
-            fire_knives = self._detect_fire_knife(hsv, frame)
+            # Detect potential fire knives (raw detections)
+            raw_fire_knives = self._detect_fire_knife_raw(hsv, frame)
 
-            # Detect bombs (small floor objects)
-            bombs = self._detect_bombs(hsv, frame, gray)
+            # Detect potential bombs (raw detections)
+            raw_bombs = self._detect_bombs_raw(hsv, frame, gray)
 
             # Detect motion for validation
             motion_info = self._detect_motion(gray)
 
+            # NEW: Apply temporal consistency filtering
+            consistent_fire_knives = self._apply_temporal_consistency(
+                raw_fire_knives, "fire_knife", motion_info
+            )
+            consistent_bombs = self._apply_temporal_consistency(
+                raw_bombs, "bomb", motion_info
+            )
+
             # Combine results
             result = {
-                "fire_knives": fire_knives,
-                "bombs": bombs,
+                "fire_knives": consistent_fire_knives,
+                "bombs": consistent_bombs,
                 "motion_detected": motion_info["has_motion"],
-                "total_threats": len(fire_knives) + len(bombs),
-                "threat_level": self._calculate_threat_level(fire_knives, bombs),
+                "total_threats": len(consistent_fire_knives) + len(consistent_bombs),
+                "threat_level": self._calculate_threat_level(
+                    consistent_fire_knives, consistent_bombs
+                ),
             }
 
-            # Debug logging for significant detections
-            if result["total_threats"] > 0:
+            # Debug logging for significant detections (reduced frequency)
+            if (
+                result["total_threats"] > 0 and self.frame_count % 30 == 0
+            ):  # Log every 30 frames only
                 print(
-                    f"   🎯 Detected: {len(fire_knives)} fire knives, {len(bombs)} bombs"
+                    f"   🎯 Consistent Threats: {len(consistent_fire_knives)} fire knives, {len(consistent_bombs)} bombs"
                 )
 
             return result
@@ -97,8 +118,8 @@ class EnhancedOpenCVDetector:
             print(f"   ⚠️ OpenCV detection error: {e}")
             return self._empty_detection()
 
-    def _detect_fire_knife(self, hsv: np.ndarray, frame: np.ndarray) -> List[Dict]:
-        """Detect big fire knife projectiles"""
+    def _detect_fire_knife_raw(self, hsv: np.ndarray, frame: np.ndarray) -> List[Dict]:
+        """Detect potential fire knife projectiles (before temporal filtering)"""
         try:
             # Create mask for fire colors
             fire_mask = cv2.inRange(hsv, self.fire_knife_lower, self.fire_knife_upper)
@@ -131,39 +152,47 @@ class EnhancedOpenCVDetector:
                     avg_hue = np.mean(roi_hsv[:, :, 0]) if roi_hsv.size > 0 else 0
                     avg_sat = np.mean(roi_hsv[:, :, 1]) if roi_hsv.size > 0 else 0
 
-                    fire_knife = {
-                        "type": "fire_knife",
-                        "position": (center_x, center_y),
-                        "bbox": (x, y, w, h),
-                        "area": area,
-                        "aspect_ratio": aspect_ratio,
-                        "avg_hue": avg_hue,
-                        "avg_saturation": avg_sat,
-                        "confidence": self._calculate_fire_knife_confidence(
-                            area, aspect_ratio, avg_hue, avg_sat
-                        ),
-                    }
+                    # NEW: Higher confidence threshold for initial detection
+                    confidence = self._calculate_fire_knife_confidence(
+                        area, aspect_ratio, avg_hue, avg_sat
+                    )
 
-                    fire_knives.append(fire_knife)
+                    # FILTER: Only keep high-confidence detections
+                    if confidence > 0.3:  # Increased from implicit 0.0 to 0.3
+                        fire_knife = {
+                            "type": "fire_knife",
+                            "position": (center_x, center_y),
+                            "bbox": (x, y, w, h),
+                            "area": area,
+                            "aspect_ratio": aspect_ratio,
+                            "avg_hue": avg_hue,
+                            "avg_saturation": avg_sat,
+                            "confidence": confidence,
+                            "frame_first_seen": self.frame_count,
+                        }
+
+                        fire_knives.append(fire_knife)
 
             # Sort by confidence and return top detections
             fire_knives.sort(key=lambda x: x["confidence"], reverse=True)
-            return fire_knives[:3]  # Return top 3 most confident detections
+            return fire_knives[:2]  # Reduced from 3 to 2 top detections
 
         except Exception as e:
             print(f"   ⚠️ Fire knife detection error: {e}")
             return []
 
-    def _detect_bombs(
+    def _detect_bombs_raw(
         self, hsv: np.ndarray, frame: np.ndarray, gray: np.ndarray
     ) -> List[Dict]:
-        """Detect small bombs on the floor"""
+        """Detect potential small bombs (before temporal filtering)"""
         try:
             # Create mask for bright objects (bombs are typically bright)
             bomb_mask = cv2.inRange(hsv, self.bomb_lower, self.bomb_upper)
 
             # Additional brightness filter in RGB space
-            bright_mask = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)[1]
+            bright_mask = cv2.threshold(gray, 220, 255, cv2.THRESH_BINARY)[
+                1
+            ]  # Increased from 200 to 220
 
             # Combine masks
             combined_mask = cv2.bitwise_and(bomb_mask, bright_mask)
@@ -203,24 +232,30 @@ class EnhancedOpenCVDetector:
                     roi_gray = gray[y : y + h, x : x + w]
                     avg_brightness = np.mean(roi_gray) if roi_gray.size > 0 else 0
 
-                    bomb = {
-                        "type": "bomb",
-                        "position": (center_x, center_y),
-                        "bbox": (x, y, w, h),
-                        "area": area,
-                        "circularity": circularity,
-                        "is_on_floor": is_on_floor,
-                        "avg_brightness": avg_brightness,
-                        "confidence": self._calculate_bomb_confidence(
-                            area, circularity, is_on_floor, avg_brightness
-                        ),
-                    }
+                    # NEW: Higher confidence threshold for initial detection
+                    confidence = self._calculate_bomb_confidence(
+                        area, circularity, is_on_floor, avg_brightness
+                    )
 
-                    bombs.append(bomb)
+                    # FILTER: Only keep high-confidence detections
+                    if confidence > 0.4:  # Increased threshold for bombs
+                        bomb = {
+                            "type": "bomb",
+                            "position": (center_x, center_y),
+                            "bbox": (x, y, w, h),
+                            "area": area,
+                            "circularity": circularity,
+                            "is_on_floor": is_on_floor,
+                            "avg_brightness": avg_brightness,
+                            "confidence": confidence,
+                            "frame_first_seen": self.frame_count,
+                        }
+
+                        bombs.append(bomb)
 
             # Sort by confidence and return top detections
             bombs.sort(key=lambda x: x["confidence"], reverse=True)
-            return bombs[:5]  # Return top 5 most confident bomb detections
+            return bombs[:3]  # Reduced from 5 to 3 top detections
 
         except Exception as e:
             print(f"   ⚠️ Bomb detection error: {e}")
@@ -260,17 +295,144 @@ class EnhancedOpenCVDetector:
             print(f"   ⚠️ Motion detection error: {e}")
             return {"has_motion": False, "motion_areas": []}
 
+    def _apply_temporal_consistency(
+        self, raw_detections: List[Dict], object_type: str, motion_info: Dict
+    ) -> List[Dict]:
+        """Apply temporal consistency filtering to reduce false positives"""
+        try:
+            consistent_objects = []
+            tracker = (
+                self.fire_knife_tracker
+                if object_type == "fire_knife"
+                else self.bomb_tracker
+            )
+
+            # Update tracker with current detections
+            current_frame_objects = {}
+
+            for detection in raw_detections:
+                pos = detection["position"]
+                object_id = self._get_nearest_tracked_id(pos, tracker, max_distance=30)
+
+                if object_id is not None:
+                    # Update existing tracked object
+                    tracker[object_id]["last_seen"] = self.frame_count
+                    tracker[object_id]["positions"].append(pos)
+                    tracker[object_id]["confidences"].append(detection["confidence"])
+                    tracker[object_id]["detection"] = detection
+                    current_frame_objects[object_id] = tracker[object_id]
+                else:
+                    # Create new tracked object
+                    new_id = f"{object_type}_{self.frame_count}_{len(tracker)}"
+                    tracker[new_id] = {
+                        "first_seen": self.frame_count,
+                        "last_seen": self.frame_count,
+                        "positions": [pos],
+                        "confidences": [detection["confidence"]],
+                        "detection": detection,
+                        "confirmed": False,
+                    }
+                    current_frame_objects[new_id] = tracker[new_id]
+
+            # Clean up old tracked objects (not seen for 10 frames)
+            ids_to_remove = []
+            for obj_id, obj_data in tracker.items():
+                if self.frame_count - obj_data["last_seen"] > 10:
+                    ids_to_remove.append(obj_id)
+
+            for obj_id in ids_to_remove:
+                del tracker[obj_id]
+
+            # Apply consistency rules
+            for obj_id, obj_data in current_frame_objects.items():
+                frames_tracked = obj_data["last_seen"] - obj_data["first_seen"] + 1
+                avg_confidence = np.mean(obj_data["confidences"])
+
+                # CONSISTENCY RULES:
+                should_include = False
+
+                if object_type == "fire_knife":
+                    # Fire knives: require either high confidence OR consistent tracking OR motion
+                    if (
+                        avg_confidence > 0.6  # High confidence
+                        or frames_tracked
+                        >= self.min_tracking_frames  # Tracked consistently
+                        or self._has_motion_in_area(
+                            obj_data["detection"]["bbox"], motion_info
+                        )
+                    ):  # Has motion
+                        should_include = True
+
+                elif object_type == "bomb":
+                    # Bombs: require high confidence AND floor position AND multiple frames
+                    if (
+                        avg_confidence > 0.5  # Good confidence
+                        and obj_data["detection"]["is_on_floor"]  # On floor
+                        and frames_tracked >= 2
+                    ):  # At least 2 frames
+                        should_include = True
+
+                if should_include:
+                    consistent_objects.append(obj_data["detection"])
+
+            return consistent_objects
+
+        except Exception as e:
+            print(f"   ⚠️ Temporal consistency error: {e}")
+            return raw_detections[:1]  # Fallback: return only the best detection
+
+    def _get_nearest_tracked_id(
+        self, position: Tuple[int, int], tracker: Dict, max_distance: int = 30
+    ):
+        """Find the nearest tracked object within max_distance"""
+        min_distance = float("inf")
+        nearest_id = None
+
+        for obj_id, obj_data in tracker.items():
+            if obj_data["positions"]:
+                last_pos = obj_data["positions"][-1]
+                distance = np.sqrt(
+                    (position[0] - last_pos[0]) ** 2 + (position[1] - last_pos[1]) ** 2
+                )
+
+                if distance < max_distance and distance < min_distance:
+                    min_distance = distance
+                    nearest_id = obj_id
+
+        return nearest_id
+
+    def _has_motion_in_area(
+        self, bbox: Tuple[int, int, int, int], motion_info: Dict
+    ) -> bool:
+        """Check if there's motion in the specified bounding box area"""
+        try:
+            x, y, w, h = bbox
+
+            for motion_area in motion_info.get("motion_areas", []):
+                mx, my, mw, mh = motion_area
+
+                # Check for overlap between bbox and motion area
+                if x < mx + mw and x + w > mx and y < my + mh and y + h > my:
+                    return True
+
+            return False
+
+        except Exception:
+            return False
+
     def _calculate_fire_knife_confidence(
         self, area: float, aspect_ratio: float, avg_hue: float, avg_sat: float
     ) -> float:
         """Calculate confidence score for fire knife detection"""
         confidence = 0.0
 
-        # Size confidence (bigger is better for fire knife, but not too big)
-        if 500 < area < 2500:
-            confidence += 0.4
-        elif 150 < area < 4000:
-            confidence += 0.2
+        # Size confidence (bigger is better for fire knife, including large special attacks)
+        if 500 < area < 3000:
+            confidence += 0.4  # Medium-large projectiles
+        elif 3000 < area < 8000:
+            confidence += 0.5  # Large fire attacks/special moves
+        elif 150 < area < 12000:
+            confidence += 0.2  # Any valid fire detection
 
         # Color confidence (orange/red hues)
         if 8 < avg_hue < 22 and avg_sat > 100:  # Good orange/red
@@ -467,11 +629,13 @@ class PositionalEncoding(nn.Module):
 class VisionTransformer(nn.Module):
     """Vision Transformer for combining visual, OpenCV, and momentum features"""
 
-    def __init__(self, visual_dim=256, opencv_dim=10, momentum_dim=8, seq_length=8):
+    def __init__(
+        self, visual_dim=512, opencv_dim=10, momentum_dim=8, seq_length=8
+    ):  # FIXED: visual_dim=512
         super().__init__()
         self.seq_length = seq_length
 
-        # Combined input dimension: 256 + 10 + 8 = 274
+        # Combined input dimension: 512 + 10 + 8 = 530 (FIXED to match actual dimensions)
         combined_dim = visual_dim + opencv_dim + momentum_dim
 
         # Project to transformer dimension
@@ -597,9 +761,18 @@ class VisionPipelineWrapper(gym.Wrapper):
         try:
             self.cnn_extractor = feature_extractor
 
-            # Initialize vision transformer
+            # Get the actual feature dimension from the extractor
+            actual_feature_dim = self.cnn_extractor.features_dim
+            print(f"   📏 Detected CNN feature dimension: {actual_feature_dim}")
+
+            # Initialize vision transformer with correct dimensions
             device = next(feature_extractor.parameters()).device
-            self.vision_transformer = VisionTransformer().to(device)
+            self.vision_transformer = VisionTransformer(
+                visual_dim=actual_feature_dim,  # Use actual dimension
+                opencv_dim=10,
+                momentum_dim=8,
+                seq_length=self.frame_stack,
+            ).to(device)
             self.vision_ready = True
             self.stats["vision_transformer_ready"] = True
 
@@ -712,7 +885,10 @@ class VisionPipelineWrapper(gym.Wrapper):
                         self.cnn_extractor(obs_tensor).squeeze(0).cpu().numpy()
                     )
             else:
-                visual_features = np.zeros(256, dtype=np.float32)
+                # Use default feature dimension from the Vision Transformer
+                visual_features = np.zeros(
+                    512, dtype=np.float32
+                )  # FIXED: Use 512 to match actual CNN output
 
             # Store in history buffers
             self.visual_features_history.append(visual_features)
