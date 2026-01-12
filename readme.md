@@ -6,6 +6,10 @@
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.7.0-red.svg)](https://pytorch.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+<div align="center">
+  <img src="images/samurai-shodown-characters.webp" alt="Samurai Shodown Characters" width="600"/>
+</div>
+
 ## Overview
 
 This project implements a state-of-the-art reinforcement learning agent that learns to play Samurai Shodown through self-play. By combining **JEPA (Joint-Embedding Predictive Architecture)** with **Proximal Policy Optimization (PPO)**, the agent develops sophisticated fighting strategies and temporal understanding of game mechanics.
@@ -16,6 +20,13 @@ This project implements a state-of-the-art reinforcement learning agent that lea
 - **Advanced Architecture**: Custom CNN-Transformer hybrid with temporal sequence modeling
 - **Predictive Understanding**: JEPA enables the agent to anticipate opponent moves and game outcomes
 - **Robust Training**: Anti-spam mechanisms and comprehensive reward shaping for stable learning
+
+## Gameplay Demonstration
+
+<div align="center">
+  <img src="images/gameplay-screenshot.jpg" alt="AI Agent Playing Samurai Shodown" width="700"/>
+  <p><em>The AI agent in action - demonstrating learned combat strategies and timing</em></p>
+</div>
 
 ## Technical Highlights
 
